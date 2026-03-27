@@ -6,16 +6,17 @@ type TrainingType =
   | "Kein Training"
   | "Ruhetag"
   | "Spaziergang"
+  | "Walken"
+  | "Laufen"
   | "Zone 2"
   | "Intervall"
   | "Schwelle"
   | "Kraft Oberkörper"
   | "Kraft Beine"
-  | "Ganzkörper"
   | "Mobility"
   | "Sonstiges";
 
-type PreferredTraining = "Egal" | "Rad" | "Kraft";
+type PreferredTraining = "Egal" | "Rad" | "Laufen" | "Walken" | "Spaziergang" | "Kraft";
 
 type DayEntry = {
   date: string;
@@ -35,6 +36,8 @@ type DayEntry = {
   yesterdayTrainingNote: string;
   yesterdayLoad: number;
   completedWorkout: boolean;
+  completedTrainingType: TrainingType;
+  completedLoad: number;
   completedDuration: number;
   completedRpe: number;
   completedNote: string;
@@ -79,6 +82,8 @@ type Profile = {
 
 type TrainingFeedbackForm = {
   completedWorkout: boolean;
+  completedTrainingType: TrainingType;
+  completedLoad: number;
   completedDuration: number;
   completedRpe: number;
   completedNote: string;
@@ -91,17 +96,25 @@ const trainingOptions: TrainingType[] = [
   "Kein Training",
   "Ruhetag",
   "Spaziergang",
+  "Walken",
+  "Laufen",
   "Zone 2",
   "Intervall",
   "Schwelle",
   "Kraft Oberkörper",
   "Kraft Beine",
-  "Ganzkörper",
   "Mobility",
   "Sonstiges",
 ];
 
-const preferredTrainingOptions: PreferredTraining[] = ["Egal", "Rad", "Kraft"];
+const preferredTrainingOptions: PreferredTraining[] = [
+  "Egal",
+  "Rad",
+  "Laufen",
+  "Walken",
+  "Spaziergang",
+  "Kraft",
+];
 
 const defaultZonesMario: HeartRateZones = {
   zone1Min: 95,
@@ -147,6 +160,8 @@ const emptyForm: DayEntry = {
   yesterdayTrainingNote: "",
   yesterdayLoad: "" as unknown as number,
   completedWorkout: false,
+  completedTrainingType: "Kein Training",
+  completedLoad: 0,
   completedDuration: 0,
   completedRpe: 0,
   completedNote: "",
@@ -154,6 +169,8 @@ const emptyForm: DayEntry = {
 
 const emptyFeedback: TrainingFeedbackForm = {
   completedWorkout: false,
+  completedTrainingType: "Kein Training",
+  completedLoad: 0,
   completedDuration: 0,
   completedRpe: 0,
   completedNote: "",
@@ -232,6 +249,7 @@ function getCompletionLabel(entry: DayEntry) {
   if (!entry.completedWorkout) return "Nicht als erledigt markiert";
   const parts: string[] = ["Erledigt"];
   if (entry.completedDuration > 0) parts.push(`${entry.completedDuration} min`);
+  if (entry.completedLoad > 0) parts.push(`Load ${entry.completedLoad}`);
   if (entry.completedRpe > 0) parts.push(`RPE ${entry.completedRpe}/10`);
   return parts.join(" · ");
 }
@@ -656,8 +674,8 @@ function sanitizeLoadedProfiles(raw: unknown): Profile[] {
           trainingOptions.includes(entry.yesterdayTrainingType as TrainingType)
             ? (entry.yesterdayTrainingType as TrainingType)
             : trainingOptions.includes(entry.yesterdayTraining as TrainingType)
-            ? (entry.yesterdayTraining as TrainingType)
-            : "Kein Training";
+              ? (entry.yesterdayTraining as TrainingType)
+              : "Kein Training";
 
         const preferredTraining: PreferredTraining =
           preferredTrainingOptions.includes(entry.preferredTraining as PreferredTraining)
@@ -682,6 +700,10 @@ function sanitizeLoadedProfiles(raw: unknown): Profile[] {
           yesterdayTrainingNote: String(entry.yesterdayTrainingNote ?? ""),
           yesterdayLoad: Number(entry.yesterdayLoad ?? 0),
           completedWorkout: Boolean(entry.completedWorkout ?? false),
+          completedTrainingType: trainingOptions.includes(entry.completedTrainingType as TrainingType)
+            ? (entry.completedTrainingType as TrainingType)
+            : "Kein Training",
+          completedLoad: Number(entry.completedLoad ?? 0),
           completedDuration: Number(entry.completedDuration ?? 0),
           completedRpe: Number(entry.completedRpe ?? 0),
           completedNote: String(entry.completedNote ?? ""),
@@ -713,21 +735,48 @@ function sanitizeLoadedProfiles(raw: unknown): Profile[] {
     const found = loaded.find((p) => p.id === defaultProfile.id);
     return found
       ? {
-          ...defaultProfile,
-          ...found,
-          entries: found.entries ?? [],
-          heightCm: found.heightCm || defaultProfile.heightCm,
-          zones: {
-            ...defaultProfile.zones,
-            ...(found.zones ?? {}),
-          },
-        }
+        ...defaultProfile,
+        ...found,
+        entries: found.entries ?? [],
+        heightCm: found.heightCm || defaultProfile.heightCm,
+        zones: {
+          ...defaultProfile.zones,
+          ...(found.zones ?? {}),
+        },
+      }
       : defaultProfile;
   });
 
   return merged;
 }
+function getFormTrendLabel(result: Recommendation, selectedEntry: DayEntry | null) {
+  if (!selectedEntry) return "Noch keine Daten";
 
+  if (result.ampel === "GRUEN") {
+    if (
+      result.recommendation.includes("INTERVALL") ||
+      result.recommendation.includes("QUALITÄT")
+    ) {
+      return "Frisch für Qualität";
+    }
+    if (result.recommendation.includes("KRAFT")) {
+      return "Belastbar";
+    }
+    return "Form steigt";
+  }
+
+  if (result.ampel === "GELB") {
+    return "Formerhalt";
+  }
+
+  return "Erholung nötig";
+}
+function getLoadLabel(load: number) {
+  if (load <= 0) return "-";
+  if (load < 60) return "leicht";
+  if (load < 120) return "mittel";
+  return "hart";
+}
 export default function Home() {
   const [profiles, setProfiles] = useState<Profile[]>(defaultProfiles);
   const [activeProfileId, setActiveProfileId] = useState<string>("mario");
@@ -808,6 +857,8 @@ export default function Home() {
 
     setFeedback({
       completedWorkout: selectedEntry.completedWorkout,
+      completedTrainingType: selectedEntry.completedTrainingType,
+      completedLoad: selectedEntry.completedLoad,
       completedDuration: selectedEntry.completedDuration,
       completedRpe: selectedEntry.completedRpe,
       completedNote: selectedEntry.completedNote,
@@ -837,7 +888,7 @@ export default function Home() {
   }, [sortedEntries, selectedEntry, heightCm, zones]);
 
   const ampelStyle = getAmpelStyle(result.ampel);
-
+  const formTrendLabel = getFormTrendLabel(result, selectedEntry);
   const last3 = sortedEntries.slice(-3);
   const avgSleep3 = average(last3.map((entry) => entry.sleepHours)).toFixed(1);
   const avgStress3 = average(last3.map((entry) => entry.stressAvg)).toFixed(0);
@@ -929,6 +980,8 @@ export default function Home() {
       ...entry,
       date: getTodayDateString(),
       completedWorkout: false,
+      completedTrainingType: "Kein Training",
+      completedLoad: 0,
       completedDuration: 0,
       completedRpe: 0,
       completedNote: "",
@@ -978,6 +1031,7 @@ export default function Home() {
       soreness: Number(form.soreness),
       energyFeeling: Number(form.energyFeeling),
       yesterdayLoad: Number(form.yesterdayLoad),
+      completedLoad: Number(form.completedLoad),
       completedDuration: Number(form.completedDuration),
       completedRpe: Number(form.completedRpe),
     };
@@ -999,18 +1053,22 @@ export default function Home() {
   function saveFeedbackForSelectedEntry() {
     if (!selectedEntry) return;
 
+    const selectedEntryDate = selectedEntry.date;
+
     updateActiveProfile((profile) => ({
       ...profile,
       entries: profile.entries
         .map((entry) =>
-          entry.date === selectedEntry.date
+          entry.date === selectedEntryDate
             ? {
-                ...entry,
-                completedWorkout: feedback.completedWorkout,
-                completedDuration: Number(feedback.completedDuration),
-                completedRpe: Number(feedback.completedRpe),
-                completedNote: feedback.completedNote,
-              }
+              ...entry,
+              completedWorkout: feedback.completedWorkout,
+              completedTrainingType: feedback.completedTrainingType,
+              completedLoad: Number(feedback.completedLoad),
+              completedDuration: Number(feedback.completedDuration),
+              completedRpe: Number(feedback.completedRpe),
+              completedNote: feedback.completedNote,
+            }
             : entry
         )
         .sort(compareDatesAsc),
@@ -1028,6 +1086,11 @@ export default function Home() {
     setFeedback((prev) => ({
       ...prev,
       completedWorkout: true,
+      completedTrainingType:
+        prev.completedTrainingType !== "Kein Training"
+          ? prev.completedTrainingType
+          : (selectedEntry?.yesterdayTrainingType ?? "Kein Training") as TrainingType,
+      completedLoad: prev.completedLoad > 0 ? prev.completedLoad : 60,
       completedDuration: durationFallback,
       completedRpe: prev.completedRpe > 0 ? prev.completedRpe : 6,
     }));
@@ -1038,18 +1101,22 @@ export default function Home() {
 
     if (!selectedEntry) return;
 
+    const selectedEntryDate = selectedEntry.date;
+
     updateActiveProfile((profile) => ({
       ...profile,
       entries: profile.entries
         .map((entry) =>
-          entry.date === selectedEntry.date
+          entry.date === selectedEntryDate
             ? {
-                ...entry,
-                completedWorkout: false,
-                completedDuration: 0,
-                completedRpe: 0,
-                completedNote: "",
-              }
+              ...entry,
+              completedWorkout: false,
+              completedTrainingType: "Kein Training" as TrainingType,
+              completedLoad: 0,
+              completedDuration: 0,
+              completedRpe: 0,
+              completedNote: "",
+            }
             : entry
         )
         .sort(compareDatesAsc),
@@ -1062,12 +1129,18 @@ export default function Home() {
         <section style={styles.headerCard}>
           <div>
             <div style={styles.kicker}>Trainings-App Mehrbenutzer</div>
-            <h1 style={styles.title}>Mario Coach</h1>
+            <h1 style={styles.title}>PeakForm</h1>
             <p style={styles.subtitle}>
-              Pulszonen, konkrete Trainingsvorschläge und getrennte Profile
+              Train smarter. Perform better
             </p>
           </div>
-          <div style={styles.headerIcon}>👥</div>
+          <div style={styles.headerIcon}>
+            <img
+              src="/icon.png"
+              alt="PeakForm Icon"
+              style={{ width: 32, height: 32, objectFit: "contain" }}
+            />
+          </div>
         </section>
 
         <section style={styles.card}>
@@ -1088,9 +1161,7 @@ export default function Home() {
 
           <div style={styles.profileInfoBox}>
             <div style={styles.profileName}>{activeProfile?.name}</div>
-            <div style={styles.profileMeta}>
-              Größe: {heightCm} cm · Einträge: {entries.length}
-            </div>
+            <div style={styles.profileMeta}>Tendenz: {formTrendLabel}</div>
           </div>
         </section>
 
@@ -1136,6 +1207,12 @@ export default function Home() {
                 <div style={styles.noteItem}>
                   <strong>Ablauf:</strong> {result.workoutDescription}
                 </div>
+                <div style={styles.noteItem}>
+                  <strong>Trainingsart:</strong> {selectedEntry?.completedTrainingType || "-"}
+                </div>
+                <div style={styles.noteItem}>
+                  <strong>Belastungswert:</strong> {selectedEntry?.completedLoad ?? 0} · {getLoadLabel(selectedEntry?.completedLoad ?? 0)}
+                </div>
               </div>
             </section>
 
@@ -1158,13 +1235,14 @@ export default function Home() {
                 <>
                   <div style={styles.noteList}>
                     <div style={styles.noteItem}>
-                      <strong>Status:</strong> {getCompletionLabel(selectedEntry)}
+                      <strong>Ablauf:</strong> {result.workoutDescription}
                     </div>
-                    {selectedEntry.completedNote?.trim() ? (
-                      <div style={styles.noteItem}>
-                        <strong>Notiz:</strong> {selectedEntry.completedNote}
-                      </div>
-                    ) : null}
+                    <div style={styles.noteItem}>
+                      <strong>Trainingsart:</strong> {selectedEntry?.completedTrainingType || "-"}
+                    </div>
+                    <div style={styles.noteItem}>
+                      <strong>Belastungswert:</strong> {selectedEntry?.completedLoad ?? 0} · {getLoadLabel(selectedEntry?.completedLoad ?? 0)}
+                    </div>
                   </div>
 
                   <div style={styles.formGrid}>
@@ -1179,6 +1257,18 @@ export default function Home() {
 
                     <div />
 
+                    <SelectField
+                      label="Art des Trainings"
+                      value={feedback.completedTrainingType}
+                      options={trainingOptions}
+                      onChange={(v) => updateFeedback("completedTrainingType", v as TrainingType)}
+                    />
+                    <Field
+                      label="Belastungswert"
+                      type="number"
+                      value={feedback.completedLoad}
+                      onChange={(v) => updateFeedback("completedLoad", Number(v))}
+                    />
                     <Field
                       label="Tatsächliche Dauer (min)"
                       type="number"
@@ -1191,6 +1281,9 @@ export default function Home() {
                       value={feedback.completedRpe}
                       onChange={(v) => updateFeedback("completedRpe", Number(v))}
                     />
+                    <div style={{ ...styles.noteItem, gridColumn: "1 / -1" }}>
+                      <strong>Belastung bewertet als:</strong> {getLoadLabel(feedback.completedLoad)}
+                    </div>
                     <Field
                       label="Notiz zum Training"
                       type="text"
@@ -1302,118 +1395,125 @@ export default function Home() {
               </div>
             </div>
 
-            <div style={styles.formGrid}>
-              <Field
-                label="Datum"
-                type="date"
-                value={form.date}
-                onChange={(v) => updateForm("date", v)}
-              />
-              <Field
-                label="Größe (cm)"
-                type="number"
-                value={heightCm}
-                onChange={(v) => updateHeight(Number(v))}
-              />
-              <Field
-                label="Gewicht (kg)"
-                type="number"
-                value={form.weight}
-                onChange={(v) => updateForm("weight", Number(v))}
-                step="0.1"
-              />
-              <Field
-                label="Bauchumfang (cm)"
-                type="number"
-                value={form.waist}
-                onChange={(v) => updateForm("waist", Number(v))}
-                step="0.1"
-              />
-              <Field
-                label="Schlafdauer (h)"
-                type="number"
-                value={form.sleepHours}
-                onChange={(v) => updateForm("sleepHours", Number(v))}
-                step="0.1"
-              />
-              <Field
-                label="Sleep Score"
-                type="number"
-                value={form.sleepScore}
-                onChange={(v) => updateForm("sleepScore", Number(v))}
-              />
-              <Field
-                label="HFV Nacht (ms)"
-                type="number"
-                value={form.hrvNight}
-                onChange={(v) => updateForm("hrvNight", Number(v))}
-                step="0.1"
-              />
-              <Field
-                label="HFV 7T-Schnitt (ms)"
-                type="number"
-                value={form.hrv7d}
-                onChange={(v) => updateForm("hrv7d", Number(v))}
-                step="0.1"
-              />
-              <Field
-                label="Ruhepuls"
-                type="number"
-                value={form.restingHr}
-                onChange={(v) => updateForm("restingHr", Number(v))}
-              />
-              <Field
-                label="Stress Garmin Ø"
-                type="number"
-                value={form.stressAvg}
-                onChange={(v) => updateForm("stressAvg", Number(v))}
-              />
-              <Field
-                label="Body Battery morgens"
-                type="number"
-                value={form.bodyBatteryMorning}
-                onChange={(v) => updateForm("bodyBatteryMorning", Number(v))}
-              />
-              <Field
-                label="Muskelkater (1-10)"
-                type="number"
-                value={form.soreness}
-                onChange={(v) => updateForm("soreness", Number(v))}
-              />
-              <Field
-                label="Energiegefühl heute (1-10)"
-                type="number"
-                value={form.energyFeeling}
-                onChange={(v) => updateForm("energyFeeling", Number(v))}
-              />
-              <Field
-                label="Belastung gestern"
-                type="number"
-                value={form.yesterdayLoad}
-                onChange={(v) => updateForm("yesterdayLoad", Number(v))}
-              />
+            <div style={{ ...styles.card, background: "#eff6ff", borderColor: "#bfdbfe" }}>
+              <h4 style={{ margin: 0, marginBottom: 10 }}>Pflichtdaten für Empfehlung</h4>
 
-              <SelectField
-                label="Training gestern"
-                value={form.yesterdayTrainingType}
-                options={trainingOptions}
-                onChange={(v) => updateForm("yesterdayTrainingType", v as TrainingType)}
-              />
+              <div style={styles.formGrid}>
+                <Field
+                  label="Datum"
+                  type="date"
+                  value={form.date}
+                  onChange={(v) => updateForm("date", v)}
+                />
+                <Field
+                  label="Body Battery morgens"
+                  type="number"
+                  value={form.bodyBatteryMorning}
+                  onChange={(v) => updateForm("bodyBatteryMorning", Number(v))}
+                />
+                <Field
+                  label="Sleep Score"
+                  type="number"
+                  value={form.sleepScore}
+                  onChange={(v) => updateForm("sleepScore", Number(v))}
+                />
+                <Field
+                  label="HFV Nacht (ms)"
+                  type="number"
+                  value={form.hrvNight}
+                  onChange={(v) => updateForm("hrvNight", Number(v))}
+                />
+                <Field
+                  label="Stress Garmin Ø"
+                  type="number"
+                  value={form.stressAvg}
+                  onChange={(v) => updateForm("stressAvg", Number(v))}
+                />
+                <Field
+                  label="Energiegefühl heute (1-10)"
+                  type="number"
+                  value={form.energyFeeling}
+                  onChange={(v) => updateForm("energyFeeling", Number(v))}
+                />
+                <Field
+                  label="Belastung gestern"
+                  type="number"
+                  value={form.yesterdayLoad}
+                  onChange={(v) => updateForm("yesterdayLoad", Number(v))}
+                />
+                <SelectField
+                  label="Training gestern"
+                  value={form.yesterdayTrainingType}
+                  options={trainingOptions}
+                  onChange={(v) => updateForm("yesterdayTrainingType", v as TrainingType)}
+                />
+                <SelectField
+                  label="Heute lieber"
+                  value={form.preferredTraining}
+                  options={preferredTrainingOptions}
+                  onChange={(v) => updateForm("preferredTraining", v as PreferredTraining)}
+                />
+              </div>
+            </div>
 
-              <SelectField
-                label="Heute lieber"
-                value={form.preferredTraining}
-                options={preferredTrainingOptions}
-                onChange={(v) => updateForm("preferredTraining", v as PreferredTraining)}
-              />
+            <div style={{ ...styles.card, background: "#f8fafc", marginTop: 12 }}>
+              <h4 style={{ margin: 0, marginBottom: 10 }}>Optionale Zusatzdaten</h4>
 
-              <Field
-                label="Notiz Training gestern"
-                type="text"
-                value={form.yesterdayTrainingNote}
-                onChange={(v) => updateForm("yesterdayTrainingNote", v)}
-                full
-              />
+              <div style={styles.formGrid}>
+                <Field
+                  label="Größe (cm)"
+                  type="number"
+                  value={heightCm}
+                  onChange={(v) => updateHeight(Number(v))}
+                />
+                <Field
+                  label="Gewicht (kg)"
+                  type="number"
+                  value={form.weight}
+                  onChange={(v) => updateForm("weight", Number(v))}
+                  step="0.1"
+                />
+                <Field
+                  label="Bauchumfang (cm)"
+                  type="number"
+                  value={form.waist}
+                  onChange={(v) => updateForm("waist", Number(v))}
+                  step="0.1"
+                />
+                <Field
+                  label="Schlafdauer (h)"
+                  type="number"
+                  value={form.sleepHours}
+                  onChange={(v) => updateForm("sleepHours", Number(v))}
+                  step="0.1"
+                />
+                <Field
+                  label="HFV 7T-Schnitt (ms)"
+                  type="number"
+                  value={form.hrv7d}
+                  onChange={(v) => updateForm("hrv7d", Number(v))}
+                  step="0.1"
+                />
+                <Field
+                  label="Ruhepuls"
+                  type="number"
+                  value={form.restingHr}
+                  onChange={(v) => updateForm("restingHr", Number(v))}
+                />
+                <Field
+                  label="Muskelkater (1-10)"
+                  type="number"
+                  value={form.soreness}
+                  onChange={(v) => updateForm("soreness", Number(v))}
+                />
+                <Field
+                  label="Notiz Training gestern"
+                  type="text"
+                  value={form.yesterdayTrainingNote}
+                  onChange={(v) => updateForm("yesterdayTrainingNote", v)}
+                  full
+                />
+              </div>
             </div>
 
             <div style={styles.buttonColumn}>
@@ -1677,18 +1777,13 @@ function Field({
   step?: string;
   full?: boolean;
 }) {
-  const displayValue =
-    type === "number" && (value === 0 || value === "0" || Number.isNaN(value))
-      ? ""
-      : value;
-
   return (
     <label style={{ ...styles.fieldWrap, ...(full ? styles.fullWidth : {}) }}>
       <span style={styles.fieldLabel}>{label}</span>
       <input
         type={type}
         step={step}
-        value={displayValue}
+        value={value}
         onChange={(e) => onChange(e.target.value)}
         style={styles.input}
       />
