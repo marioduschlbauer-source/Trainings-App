@@ -131,21 +131,21 @@ const defaultZonesManuela: HeartRateZones = {
 
 const emptyForm: DayEntry = {
   date: "",
-  weight: 0,
-  waist: 0,
-  sleepHours: 0,
-  sleepScore: 0,
-  hrvNight: 0,
-  hrv7d: 0,
-  restingHr: 0,
-  stressAvg: 0,
-  bodyBatteryMorning: 0,
-  soreness: 0,
-  energyFeeling: 5,
+  weight: "" as unknown as number,
+  waist: "" as unknown as number,
+  sleepHours: "" as unknown as number,
+  sleepScore: "" as unknown as number,
+  hrvNight: "" as unknown as number,
+  hrv7d: "" as unknown as number,
+  restingHr: "" as unknown as number,
+  stressAvg: "" as unknown as number,
+  bodyBatteryMorning: "" as unknown as number,
+  soreness: "" as unknown as number,
+  energyFeeling: "" as unknown as number,
   preferredTraining: "Egal",
   yesterdayTrainingType: "Kein Training",
   yesterdayTrainingNote: "",
-  yesterdayLoad: 0,
+  yesterdayLoad: "" as unknown as number,
   completedWorkout: false,
   completedDuration: 0,
   completedRpe: 0,
@@ -1677,13 +1677,18 @@ function Field({
   step?: string;
   full?: boolean;
 }) {
+  const displayValue =
+    type === "number" && (value === 0 || value === "0" || Number.isNaN(value))
+      ? ""
+      : value;
+
   return (
     <label style={{ ...styles.fieldWrap, ...(full ? styles.fullWidth : {}) }}>
       <span style={styles.fieldLabel}>{label}</span>
       <input
         type={type}
         step={step}
-        value={value}
+        value={displayValue}
         onChange={(e) => onChange(e.target.value)}
         style={styles.input}
       />
