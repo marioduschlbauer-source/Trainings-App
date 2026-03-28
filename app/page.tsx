@@ -18,10 +18,19 @@ type TrainingType =
   | "Sonstiges";
 
 type PreferredTraining = "Egal" | "Rad" | "Laufen" | "Walken" | "Spaziergang" | "Kraft";
+
 type TrainingSession = {
   type: TrainingType;
   note: string;
   load: number;
+};
+
+type LoggedTrainingSession = {
+  type: TrainingType;
+  load: number;
+  duration: number;
+  rpe: number;
+  note: string;
 };
 
 type DayEntry = {
@@ -39,12 +48,7 @@ type DayEntry = {
   energyFeeling: number;
   preferredTraining: PreferredTraining;
   yesterdaySessions: TrainingSession[];
-  completedWorkout: boolean;
-  completedTrainingType: TrainingType;
-  completedLoad: number;
-  completedDuration: number;
-  completedRpe: number;
-  completedNote: string;
+  todaySessions: LoggedTrainingSession[];
 };
 
 type Recommendation = {
@@ -82,15 +86,6 @@ type Profile = {
   heightCm: number;
   zones: HeartRateZones;
   entries: DayEntry[];
-};
-
-type TrainingFeedbackForm = {
-  completedWorkout: boolean;
-  completedTrainingType: TrainingType;
-  completedLoad: number;
-  completedDuration: number;
-  completedRpe: number;
-  completedNote: string;
 };
 
 const STORAGE_KEY = "mario-coach-profiles-v2";
@@ -168,21 +163,7 @@ const emptyForm: DayEntry = {
       load: 0,
     },
   ],
-  completedWorkout: false,
-  completedTrainingType: "Kein Training",
-  completedLoad: 0,
-  completedDuration: 0,
-  completedRpe: 0,
-  completedNote: "",
-};
-
-const emptyFeedback: TrainingFeedbackForm = {
-  completedWorkout: false,
-  completedTrainingType: "Kein Training",
-  completedLoad: 0,
-  completedDuration: 0,
-  completedRpe: 0,
-  completedNote: "",
+  todaySessions: [],
 };
 
 const defaultProfiles: Profile[] = [
@@ -261,15 +242,6 @@ function getTrainingLabel(entry: DayEntry) {
 
 function formatZone(min: number, max: number) {
   return `${min}–${max} bpm`;
-}
-
-function getCompletionLabel(entry: DayEntry) {
-  if (!entry.completedWorkout) return "Nicht als erledigt markiert";
-  const parts: string[] = ["Erledigt"];
-  if (entry.completedDuration > 0) parts.push(`${entry.completedDuration} min`);
-  if (entry.completedLoad > 0) parts.push(`Load ${entry.completedLoad}`);
-  if (entry.completedRpe > 0) parts.push(`RPE ${entry.completedRpe}/10`);
-  return parts.join(" · ");
 }
 
 function getZone2ShortPlan(zones: HeartRateZones) {
@@ -558,7 +530,12 @@ function getRecommendation(
 
   if (score >= 6) {
     if (current.preferredTraining === "Kraft") {
-      const plan = hardYesterday ? getUpperBodyPlan() : current.energyFeeling >= 8 ? getLegPlan() : getFullBodyShortPlan();
+      const plan = hardYesterday
+        ? getUpperBodyPlan()
+        : current.energyFeeling >= 8
+          ? getLegPlan()
+          : getFullBodyShortPlan();
+
       return {
         ampel: "GRUEN",
         recommendation: "KRAFT",
@@ -685,6 +662,67 @@ function getTodayDateString() {
   return new Date(now.getTime() - offsetMs).toISOString().slice(0, 10);
 }
 
+function getPreviousDateString(date: string) {
+  if (!date) return "";
+  const d = new Date(date);
+  if (Number.isNaN(d.getTime())) return "";
+  d.setDate(d.getDate() - 1);
+  const offsetMs = d.getTimezoneOffset() * 60000;
+  return new Date(d.getTime() - offsetMs).toISOString().slice(0, 10);
+}
+
+function buildYesterdaySessionsFromPreviousDay(
+  entries: DayEntry[],
+  currentDate: string
+): TrainingSession[] {
+  const previousDate = getPreviousDateString(currentDate);
+  if (!previousDate) {
+    return [{ type: "Kein Training", note: "", load: 0 }];
+  }
+
+  const previousEntry = entries.find((entry) => entry.date === previousDate);
+
+  if (!previousEntry || !previousEntry.todaySessions || previousEntry.todaySessions.length === 0) {
+    return [{ type: "Kein Training", note: "", load: 0 }];
+  }
+
+  return previousEntry.todaySessions.map((session) => ({
+    type: session.type,
+    load: Number(session.load || 0),
+    note: session.note ?? "",
+  }));
+}
+
+function getTodaySessionsLabel(entry: DayEntry) {
+  if (!entry.todaySessions || entry.todaySessions.length === 0) {
+    return "Noch kein heutiges Training erfasst";
+  }
+
+  return entry.todaySessions
+    .map((session) => {
+      const parts: string[] = [session.type];
+      if (session.duration > 0) parts.push(`${session.duration} min`);
+      if (session.load > 0) parts.push(`Load ${session.load}`);
+      if (session.rpe > 0) parts.push(`RPE ${session.rpe}/10`);
+      return parts.join(" · ");
+    })
+    .join(" | ");
+}
+
+function getTodaySessionsTotalLoad(entry: DayEntry) {
+  return (entry.todaySessions ?? []).reduce(
+    (sum, session) => sum + Number(session.load || 0),
+    0
+  );
+}
+
+function getTodaySessionsTotalDuration(entry: DayEntry) {
+  return (entry.todaySessions ?? []).reduce(
+    (sum, session) => sum + Number(session.duration || 0),
+    0
+  );
+}
+
 function sanitizeLoadedProfiles(raw: unknown): Profile[] {
   if (!Array.isArray(raw)) return defaultProfiles;
 
@@ -728,6 +766,32 @@ function sanitizeLoadedProfiles(raw: unknown): Profile[] {
             },
           ];
 
+        const migratedTodaySessions: LoggedTrainingSession[] = Array.isArray((entry as any).todaySessions)
+          ? (entry as any).todaySessions.map((session: any) => ({
+            type: trainingOptions.includes(session?.type as TrainingType)
+              ? (session.type as TrainingType)
+              : "Kein Training",
+            load: Number(session?.load ?? 0),
+            duration: Number(session?.duration ?? 0),
+            rpe: Number(session?.rpe ?? 0),
+            note: String(session?.note ?? ""),
+          }))
+          : Boolean((entry as any).completedWorkout) ||
+            Number((entry as any).completedLoad ?? 0) > 0 ||
+            Number((entry as any).completedDuration ?? 0) > 0
+            ? [
+              {
+                type: trainingOptions.includes((entry as any).completedTrainingType as TrainingType)
+                  ? ((entry as any).completedTrainingType as TrainingType)
+                  : "Kein Training",
+                load: Number((entry as any).completedLoad ?? 0),
+                duration: Number((entry as any).completedDuration ?? 0),
+                rpe: Number((entry as any).completedRpe ?? 0),
+                note: String((entry as any).completedNote ?? ""),
+              },
+            ]
+            : [];
+
         return {
           date: String(entry.date ?? ""),
           weight: Number(entry.weight ?? 0),
@@ -743,14 +807,7 @@ function sanitizeLoadedProfiles(raw: unknown): Profile[] {
           energyFeeling: Number(entry.energyFeeling ?? 5),
           preferredTraining,
           yesterdaySessions,
-          completedWorkout: Boolean(entry.completedWorkout ?? false),
-          completedTrainingType: trainingOptions.includes(entry.completedTrainingType as TrainingType)
-            ? (entry.completedTrainingType as TrainingType)
-            : "Kein Training",
-          completedLoad: Number(entry.completedLoad ?? 0),
-          completedDuration: Number(entry.completedDuration ?? 0),
-          completedRpe: Number(entry.completedRpe ?? 0),
-          completedNote: String(entry.completedNote ?? ""),
+          todaySessions: migratedTodaySessions,
         };
       })
       .filter((entry) => entry.date);
@@ -793,6 +850,7 @@ function sanitizeLoadedProfiles(raw: unknown): Profile[] {
 
   return merged;
 }
+
 function getFormTrendLabel(result: Recommendation, selectedEntry: DayEntry | null) {
   if (!selectedEntry) return "Noch keine Daten";
 
@@ -815,12 +873,14 @@ function getFormTrendLabel(result: Recommendation, selectedEntry: DayEntry | nul
 
   return "Erholung nötig";
 }
+
 function getLoadLabel(load: number) {
   if (load <= 0) return "-";
   if (load < 60) return "leicht";
   if (load < 120) return "mittel";
   return "hart";
 }
+
 export default function Home() {
   const [profiles, setProfiles] = useState<Profile[]>(defaultProfiles);
   const [activeProfileId, setActiveProfileId] = useState<string>("mario");
@@ -829,7 +889,6 @@ export default function Home() {
   >("eingabe");
   const [selectedDate, setSelectedDate] = useState<string>("");
   const [editingDate, setEditingDate] = useState<string | null>(null);
-  const [feedback, setFeedback] = useState<TrainingFeedbackForm>(emptyFeedback);
   const [form, setForm] = useState<DayEntry>({
     ...emptyForm,
     date: getTodayDateString(),
@@ -894,20 +953,13 @@ export default function Home() {
   }, [sortedEntries, selectedDate]);
 
   useEffect(() => {
-    if (!selectedEntry) {
-      setFeedback(emptyFeedback);
-      return;
-    }
+    if (!form.date || editingDate) return;
 
-    setFeedback({
-      completedWorkout: selectedEntry.completedWorkout,
-      completedTrainingType: selectedEntry.completedTrainingType,
-      completedLoad: selectedEntry.completedLoad,
-      completedDuration: selectedEntry.completedDuration,
-      completedRpe: selectedEntry.completedRpe,
-      completedNote: selectedEntry.completedNote,
-    });
-  }, [selectedEntry]);
+    setForm((prev) => ({
+      ...prev,
+      yesterdaySessions: buildYesterdaySessionsFromPreviousDay(entries, prev.date),
+    }));
+  }, [form.date, entries, editingDate]);
 
   const result = useMemo(() => {
     if (!selectedEntry) {
@@ -957,7 +1009,6 @@ export default function Home() {
   function handleProfileChange(nextProfileId: string) {
     setActiveProfileId(nextProfileId);
     setEditingDate(null);
-    setFeedback(emptyFeedback);
     setForm({
       ...emptyForm,
       date: getTodayDateString(),
@@ -971,16 +1022,6 @@ export default function Home() {
 
   function updateForm<K extends keyof DayEntry>(key: K, value: DayEntry[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
-  }
-
-  function addYesterdaySession() {
-    setForm((prev) => ({
-      ...prev,
-      yesterdaySessions: [
-        ...prev.yesterdaySessions,
-        { type: "Kein Training", note: "", load: 0 },
-      ],
-    }));
   }
 
   function updateYesterdaySession(
@@ -1001,21 +1042,48 @@ export default function Home() {
     }));
   }
 
-  function removeYesterdaySession(index: number) {
+  function addTodaySession() {
     setForm((prev) => ({
       ...prev,
-      yesterdaySessions:
-        prev.yesterdaySessions.length <= 1
-          ? [{ type: "Kein Training", note: "", load: 0 }]
-          : prev.yesterdaySessions.filter((_, i) => i !== index),
+      todaySessions: [
+        ...prev.todaySessions,
+        {
+          type: "Kein Training",
+          load: 0,
+          duration: 0,
+          rpe: 0,
+          note: "",
+        },
+      ],
     }));
   }
 
-  function updateFeedback<K extends keyof TrainingFeedbackForm>(
-    key: K,
-    value: TrainingFeedbackForm[K]
+  function updateTodaySession(
+    index: number,
+    key: keyof LoggedTrainingSession,
+    value: string | number
   ) {
-    setFeedback((prev) => ({ ...prev, [key]: value }));
+    setForm((prev) => ({
+      ...prev,
+      todaySessions: prev.todaySessions.map((session, i) =>
+        i === index
+          ? {
+            ...session,
+            [key]:
+              key === "load" || key === "duration" || key === "rpe"
+                ? Number(value)
+                : value,
+          }
+          : session
+      ),
+    }));
+  }
+
+  function removeTodaySession(index: number) {
+    setForm((prev) => ({
+      ...prev,
+      todaySessions: prev.todaySessions.filter((_, i) => i !== index),
+    }));
   }
 
   function updateHeight(value: number) {
@@ -1050,9 +1118,13 @@ export default function Home() {
     }
 
     const latest = sortedEntries[sortedEntries.length - 1];
+    const newDate = getTodayDateString();
+
     setForm({
       ...latest,
-      date: getTodayDateString(),
+      date: newDate,
+      yesterdaySessions: buildYesterdaySessionsFromPreviousDay(entries, newDate),
+      todaySessions: [],
     });
     setEditingDate(null);
     setActiveTab("eingabe");
@@ -1065,15 +1137,13 @@ export default function Home() {
   }
 
   function duplicateEntryToNewDate(entry: DayEntry) {
+    const newDate = getTodayDateString();
+
     setForm({
       ...entry,
-      date: getTodayDateString(),
-      completedWorkout: false,
-      completedTrainingType: "Kein Training",
-      completedLoad: 0,
-      completedDuration: 0,
-      completedRpe: 0,
-      completedNote: "",
+      date: newDate,
+      yesterdaySessions: buildYesterdaySessionsFromPreviousDay(entries, newDate),
+      todaySessions: [],
     });
     setEditingDate(null);
     setActiveTab("eingabe");
@@ -1124,9 +1194,13 @@ export default function Home() {
         note: session.note,
         load: Number(session.load),
       })),
-      completedLoad: Number(form.completedLoad),
-      completedDuration: Number(form.completedDuration),
-      completedRpe: Number(form.completedRpe),
+      todaySessions: (form.todaySessions ?? []).map((session) => ({
+        type: session.type,
+        load: Number(session.load),
+        duration: Number(session.duration),
+        rpe: Number(session.rpe),
+        note: session.note,
+      })),
     };
 
     const nextEntries = [...entries.filter((entry) => entry.date !== cleaned.date), cleaned].sort(
@@ -1143,85 +1217,12 @@ export default function Home() {
     setActiveTab("heute");
   }
 
-  function saveFeedbackForSelectedEntry() {
-    if (!selectedEntry) return;
-
-    const selectedEntryDate = selectedEntry.date;
-
-    updateActiveProfile((profile) => ({
-      ...profile,
-      entries: profile.entries
-        .map((entry) =>
-          entry.date === selectedEntryDate
-            ? {
-              ...entry,
-              completedWorkout: feedback.completedWorkout,
-              completedTrainingType: feedback.completedTrainingType,
-              completedLoad: Number(feedback.completedLoad),
-              completedDuration: Number(feedback.completedDuration),
-              completedRpe: Number(feedback.completedRpe),
-              completedNote: feedback.completedNote,
-            }
-            : entry
-        )
-        .sort(compareDatesAsc),
-    }));
-  }
-
-  function markSelectedAsDone() {
-    if (!selectedEntry) return;
-
-    const durationFallback =
-      feedback.completedDuration > 0
-        ? feedback.completedDuration
-        : parseInt(result.durationText, 10) || 45;
-
-    setFeedback((prev) => ({
-      ...prev,
-      completedWorkout: true,
-      completedTrainingType:
-        prev.completedTrainingType !== "Kein Training"
-          ? prev.completedTrainingType
-          : ((selectedEntry?.yesterdaySessions?.[0]?.type ?? "Kein Training") as TrainingType),
-      completedLoad: prev.completedLoad > 0 ? prev.completedLoad : 60,
-      completedDuration: durationFallback,
-      completedRpe: prev.completedRpe > 0 ? prev.completedRpe : 6,
-    }));
-  }
-
-  function resetSelectedFeedback() {
-    setFeedback(emptyFeedback);
-
-    if (!selectedEntry) return;
-
-    const selectedEntryDate = selectedEntry.date;
-
-    updateActiveProfile((profile) => ({
-      ...profile,
-      entries: profile.entries
-        .map((entry) =>
-          entry.date === selectedEntryDate
-            ? {
-              ...entry,
-              completedWorkout: false,
-              completedTrainingType: "Kein Training" as TrainingType,
-              completedLoad: 0,
-              completedDuration: 0,
-              completedRpe: 0,
-              completedNote: "",
-            }
-            : entry
-        )
-        .sort(compareDatesAsc),
-    }));
-  }
-
   return (
     <main style={styles.page}>
       <div style={styles.phone}>
         <section style={styles.headerCard}>
           <div>
-            <div style={styles.kicker}>Trainings-App Mehrbenutzer</div>
+            <div style={styles.kicker}>Trainings-App</div>
             <h1 style={styles.title}>PeakForm</h1>
             <p style={styles.subtitle}>
               Train smarter. Perform better
@@ -1231,8 +1232,14 @@ export default function Home() {
             <img
               src="/icon.png"
               alt="PeakForm Icon"
-              style={{ width: 32, height: 32, objectFit: "contain" }}
+              style={{
+                width: 32,
+                height: 32,
+                objectFit: "contain",
+                borderRadius: 8,
+              }}
             />
+            
           </div>
         </section>
 
@@ -1301,26 +1308,31 @@ export default function Home() {
                   <strong>Ablauf:</strong> {result.workoutDescription}
                 </div>
                 <div style={styles.noteItem}>
-                  <strong>Trainingsart:</strong> {selectedEntry?.completedTrainingType || "-"}
+                  <strong>Heute schon erfasst:</strong>{" "}
+                  {selectedEntry ? getTodaySessionsLabel(selectedEntry) : "-"}
                 </div>
                 <div style={styles.noteItem}>
-                  <strong>Belastungswert:</strong> {selectedEntry?.completedLoad ?? 0} · {getLoadLabel(selectedEntry?.completedLoad ?? 0)}
+                  <strong>Heute Gesamt-Load:</strong>{" "}
+                  {selectedEntry ? getTodaySessionsTotalLoad(selectedEntry) : 0} ·{" "}
+                  {getLoadLabel(selectedEntry ? getTodaySessionsTotalLoad(selectedEntry) : 0)}
                 </div>
               </div>
             </section>
 
             <section style={styles.card}>
               <div style={styles.cardHeaderRow}>
-                <h3 style={styles.cardTitle}>Training erledigt</h3>
+                <h3 style={styles.cardTitle}>Heute erfasste Trainings</h3>
                 <span
                   style={{
                     ...styles.statusBadge,
-                    background: selectedEntry?.completedWorkout ? "#dcfce7" : "#f8fafc",
-                    color: selectedEntry?.completedWorkout ? "#166534" : "#475569",
-                    borderColor: selectedEntry?.completedWorkout ? "#86efac" : "#cbd5e1",
+                    background: (selectedEntry?.todaySessions?.length ?? 0) > 0 ? "#dcfce7" : "#f8fafc",
+                    color: (selectedEntry?.todaySessions?.length ?? 0) > 0 ? "#166534" : "#475569",
+                    borderColor: (selectedEntry?.todaySessions?.length ?? 0) > 0 ? "#86efac" : "#cbd5e1",
                   }}
                 >
-                  {selectedEntry?.completedWorkout ? "Erledigt" : "Offen"}
+                  {(selectedEntry?.todaySessions?.length ?? 0) > 0
+                    ? `${selectedEntry?.todaySessions?.length} Einheit(en)`
+                    : "Noch nichts erfasst"}
                 </span>
               </div>
 
@@ -1328,74 +1340,22 @@ export default function Home() {
                 <>
                   <div style={styles.noteList}>
                     <div style={styles.noteItem}>
-                      <strong>Ablauf:</strong> {result.workoutDescription}
+                      <strong>Erfasste Einheiten:</strong> {getTodaySessionsLabel(selectedEntry)}
                     </div>
                     <div style={styles.noteItem}>
-                      <strong>Trainingsart:</strong> {selectedEntry?.completedTrainingType || "-"}
+                      <strong>Gesamtdauer:</strong> {getTodaySessionsTotalDuration(selectedEntry)} min
                     </div>
                     <div style={styles.noteItem}>
-                      <strong>Belastungswert:</strong> {selectedEntry?.completedLoad ?? 0} · {getLoadLabel(selectedEntry?.completedLoad ?? 0)}
+                      <strong>Gesamt-Load:</strong> {getTodaySessionsTotalLoad(selectedEntry)} ·{" "}
+                      {getLoadLabel(getTodaySessionsTotalLoad(selectedEntry))}
                     </div>
                   </div>
 
-                  <div style={styles.formGrid}>
-                    <label style={styles.checkboxWrap}>
-                      <input
-                        type="checkbox"
-                        checked={feedback.completedWorkout}
-                        onChange={(e) => updateFeedback("completedWorkout", e.target.checked)}
-                      />
-                      <span style={styles.checkboxLabel}>Training durchgeführt</span>
-                    </label>
-
-                    <div />
-
-                    <SelectField
-                      label="Art des Trainings"
-                      value={feedback.completedTrainingType}
-                      options={trainingOptions}
-                      onChange={(v) => updateFeedback("completedTrainingType", v as TrainingType)}
-                    />
-                    <Field
-                      label="Belastungswert"
-                      type="number"
-                      value={feedback.completedLoad}
-                      onChange={(v) => updateFeedback("completedLoad", Number(v))}
-                    />
-                    <Field
-                      label="Tatsächliche Dauer (min)"
-                      type="number"
-                      value={feedback.completedDuration}
-                      onChange={(v) => updateFeedback("completedDuration", Number(v))}
-                    />
-                    <Field
-                      label="Anstrengung / RPE (1-10)"
-                      type="number"
-                      value={feedback.completedRpe}
-                      onChange={(v) => updateFeedback("completedRpe", Number(v))}
-                    />
-                    <div style={{ ...styles.noteItem, gridColumn: "1 / -1" }}>
-                      <strong>Belastung bewertet als:</strong> {getLoadLabel(feedback.completedLoad)}
+                  <div style={styles.noteList}>
+                    <div style={styles.noteItem}>
+                      Diese Einheiten werden am nächsten Tag automatisch als Vortagstraining in die
+                      Eingabe übernommen.
                     </div>
-                    <Field
-                      label="Notiz zum Training"
-                      type="text"
-                      value={feedback.completedNote}
-                      onChange={(v) => updateFeedback("completedNote", v)}
-                      full
-                    />
-                  </div>
-
-                  <div style={styles.buttonTriple}>
-                    <button onClick={markSelectedAsDone} style={styles.secondaryButton}>
-                      Als erledigt vorfüllen
-                    </button>
-                    <button onClick={saveFeedbackForSelectedEntry} style={styles.primaryButton}>
-                      Feedback speichern
-                    </button>
-                    <button onClick={resetSelectedFeedback} style={styles.ghostButton}>
-                      Feedback löschen
-                    </button>
                   </div>
                 </>
               ) : (
@@ -1540,8 +1500,9 @@ export default function Home() {
                   options={preferredTrainingOptions}
                   onChange={(v) => updateForm("preferredTraining", v as PreferredTraining)}
                 />
+
                 <div style={{ ...styles.noteItem, gridColumn: "1 / -1" }}>
-                  <strong>Training gestern / mehrere Einheiten</strong>
+                  <strong>Vortagstraining automatisch übernommen</strong>
                 </div>
 
                 <div style={{ gridColumn: "1 / -1", display: "grid", gap: 10 }}>
@@ -1550,7 +1511,7 @@ export default function Home() {
                       key={index}
                       style={{
                         display: "grid",
-                        gridTemplateColumns: "1.2fr 1fr auto",
+                        gridTemplateColumns: "1.2fr 1fr",
                         gap: 10,
                         alignItems: "end",
                       }}
@@ -1569,14 +1530,6 @@ export default function Home() {
                         onChange={(v) => updateYesterdaySession(index, "load", Number(v))}
                       />
 
-                      <button
-                        type="button"
-                        onClick={() => removeYesterdaySession(index)}
-                        style={styles.smallDangerButton}
-                      >
-                        Löschen
-                      </button>
-
                       <div style={{ gridColumn: "1 / -1" }}>
                         <Field
                           label="Notiz"
@@ -1589,10 +1542,90 @@ export default function Home() {
                     </div>
                   ))}
 
-                  <button type="button" onClick={addYesterdaySession} style={styles.secondaryButton}>
-                    + Weitere Trainingseinheit
-                  </button>
+                  <div style={styles.noteItem}>
+                    Wenn gestern kein Training erfasst wurde, steht hier automatisch „Kein Training“.
+                  </div>
                 </div>
+              </div>
+            </div>
+
+            <div style={{ ...styles.card, background: "#ecfeff", borderColor: "#a5f3fc", marginTop: 12 }}>
+              <h4 style={{ margin: 0, marginBottom: 10 }}>Heute erfasste Trainings</h4>
+              <p style={{ ...styles.cardText, marginTop: 0 }}>
+                Diese Einheiten speicherst du heute. Morgen werden sie automatisch als
+                Vortagstraining übernommen.
+              </p>
+
+              <div style={styles.noteList}>
+                <div style={styles.noteItem}>
+                  <strong>Pflichtfelder:</strong> Trainingsart, Belastungswert, Dauer, RPE
+                </div>
+                <div style={styles.noteItem}>
+                  <strong>Optional:</strong> Notiz
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gap: 10, marginTop: 12 }}>
+                {form.todaySessions.map((session, index) => (
+                  <div
+                    key={index}
+                    style={{
+                      border: "1px solid #cffafe",
+                      background: "#ffffff",
+                      borderRadius: 16,
+                      padding: 12,
+                      display: "grid",
+                      gap: 12,
+                    }}
+                  >
+                    <div style={styles.formGrid}>
+                      <SelectField
+                        label={`Einheit ${index + 1}`}
+                        value={session.type}
+                        options={trainingOptions}
+                        onChange={(v) => updateTodaySession(index, "type", v as TrainingType)}
+                      />
+                      <Field
+                        label="Belastungswert"
+                        type="number"
+                        value={session.load}
+                        onChange={(v) => updateTodaySession(index, "load", Number(v))}
+                      />
+                      <Field
+                        label="Dauer (min)"
+                        type="number"
+                        value={session.duration}
+                        onChange={(v) => updateTodaySession(index, "duration", Number(v))}
+                      />
+                      <Field
+                        label="RPE (1-10)"
+                        type="number"
+                        value={session.rpe}
+                        onChange={(v) => updateTodaySession(index, "rpe", Number(v))}
+                      />
+                    </div>
+
+                    <Field
+                      label="Notiz (optional)"
+                      type="text"
+                      value={session.note}
+                      onChange={(v) => updateTodaySession(index, "note", v)}
+                      full
+                    />
+
+                    <button
+                      type="button"
+                      onClick={() => removeTodaySession(index)}
+                      style={styles.smallDangerButton}
+                    >
+                      Einheit löschen
+                    </button>
+                  </div>
+                ))}
+
+                <button type="button" onClick={addTodaySession} style={styles.secondaryButton}>
+                  + Training hinzufügen
+                </button>
               </div>
             </div>
 
@@ -1707,13 +1740,14 @@ export default function Home() {
                           )}
                         </div>
                         <div style={styles.historyLine}>
-                          <strong>Status:</strong> {getCompletionLabel(entry)}
+                          <strong>Heute erfasst:</strong> {getTodaySessionsLabel(entry)}
                         </div>
-                        {entry.completedNote?.trim() ? (
-                          <div style={styles.historyLine}>
-                            <strong>Notiz:</strong> {entry.completedNote}
-                          </div>
-                        ) : null}
+                        <div style={styles.historyLine}>
+                          <strong>Heutiger Gesamt-Load:</strong> {getTodaySessionsTotalLoad(entry)}
+                        </div>
+                        <div style={styles.historyLine}>
+                          <strong>Heutige Gesamtdauer:</strong> {getTodaySessionsTotalDuration(entry)} min
+                        </div>
                         <div style={styles.historyLine}>
                           <strong>Coach-Hinweis:</strong> {itemResult.hint}
                         </div>
@@ -1771,8 +1805,12 @@ export default function Home() {
               <h3 style={styles.cardTitle}>Wichtig</h3>
               <div style={styles.noteList}>
                 <div style={styles.noteItem}>Deine bisherigen Daten bleiben erhalten</div>
-                <div style={styles.noteItem}>Du kannst jetzt pro Tag speichern, ob du das Training wirklich gemacht hast</div>
-                <div style={styles.noteItem}>Dauer, Anstrengung und Notiz werden im Verlauf mitgespeichert</div>
+                <div style={styles.noteItem}>
+                  Heute erfasste Trainings werden morgen automatisch als Vortagstraining übernommen
+                </div>
+                <div style={styles.noteItem}>
+                  Mehrere Einheiten pro Tag mit Dauer, Load, RPE und Notiz sind jetzt möglich
+                </div>
               </div>
             </section>
           </>
@@ -2192,30 +2230,10 @@ const styles: Record<string, CSSProperties> = {
     background: "#fff",
     fontSize: 14,
   },
-  checkboxWrap: {
-    display: "flex",
-    alignItems: "center",
-    gap: 10,
-    padding: "12px 14px",
-    borderRadius: 14,
-    border: "1px solid #cbd5e1",
-    background: "#fff",
-  },
-  checkboxLabel: {
-    fontSize: 14,
-    fontWeight: 700,
-    color: "#334155",
-  },
   buttonRow: {
     display: "grid",
     gridTemplateColumns: "1fr 1fr",
     gap: 10,
-  },
-  buttonTriple: {
-    display: "grid",
-    gridTemplateColumns: "1fr",
-    gap: 10,
-    marginTop: 16,
   },
   buttonColumn: {
     display: "grid",
