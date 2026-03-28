@@ -13,10 +13,16 @@ type TrainingType =
   | "Schwelle"
   | "Kraft Oberkörper"
   | "Kraft Beine"
+  | "Kraft Ganzkörper"
   | "Mobility"
   | "Sonstiges";
 
 type PreferredTraining = "Egal" | "Rad" | "Laufen" | "Walken" | "Spaziergang" | "Kraft";
+type TrainingSession = {
+  type: TrainingType;
+  note: string;
+  load: number;
+};
 
 type DayEntry = {
   date: string;
@@ -32,9 +38,7 @@ type DayEntry = {
   soreness: number;
   energyFeeling: number;
   preferredTraining: PreferredTraining;
-  yesterdayTrainingType: TrainingType;
-  yesterdayTrainingNote: string;
-  yesterdayLoad: number;
+  yesterdaySessions: TrainingSession[];
   completedWorkout: boolean;
   completedTrainingType: TrainingType;
   completedLoad: number;
@@ -103,6 +107,7 @@ const trainingOptions: TrainingType[] = [
   "Schwelle",
   "Kraft Oberkörper",
   "Kraft Beine",
+  "Kraft Ganzkörper",
   "Mobility",
   "Sonstiges",
 ];
@@ -156,9 +161,13 @@ const emptyForm: DayEntry = {
   soreness: "" as unknown as number,
   energyFeeling: "" as unknown as number,
   preferredTraining: "Egal",
-  yesterdayTrainingType: "Kein Training",
-  yesterdayTrainingNote: "",
-  yesterdayLoad: "" as unknown as number,
+  yesterdaySessions: [
+    {
+      type: "Kein Training",
+      note: "",
+      load: 0,
+    },
+  ],
   completedWorkout: false,
   completedTrainingType: "Kein Training",
   completedLoad: 0,
@@ -235,10 +244,19 @@ function compareDatesAsc(a: DayEntry, b: DayEntry) {
 }
 
 function getTrainingLabel(entry: DayEntry) {
-  if (entry.yesterdayTrainingNote?.trim()) {
-    return `${entry.yesterdayTrainingType} – ${entry.yesterdayTrainingNote.trim()}`;
+  if (!entry.yesterdaySessions || entry.yesterdaySessions.length === 0) {
+    return "Kein Training";
   }
-  return entry.yesterdayTrainingType;
+
+  return entry.yesterdaySessions
+    .map((session) => {
+      const note = session.note?.trim();
+      const loadText = session.load > 0 ? ` (Load ${session.load})` : "";
+      return note
+        ? `${session.type} – ${note}${loadText}`
+        : `${session.type}${loadText}`;
+    })
+    .join(" | ");
 }
 
 function formatZone(min: number, max: number) {
@@ -398,12 +416,24 @@ function getRecommendation(
   const avgSleep = average(recent.map((entry) => entry.sleepHours));
   const avgStress = average(recent.map((entry) => entry.stressAvg));
   const avgBattery = average(recent.map((entry) => entry.bodyBatteryMorning));
-  const avgLoad = average(recent.map((entry) => entry.yesterdayLoad));
+  const avgLoad = average(
+    recent.map((entry) =>
+      (entry.yesterdaySessions ?? []).reduce(
+        (sum, session) => sum + Number(session.load || 0),
+        0
+      )
+    )
+  );
 
   const bmi = calcBmi(current.weight, heightCm);
-  const hardYesterday = isHardTraining(
-    current.yesterdayTrainingType,
-    current.yesterdayTrainingNote
+
+  const currentTotalLoad = (current.yesterdaySessions ?? []).reduce(
+    (sum, session) => sum + Number(session.load || 0),
+    0
+  );
+
+  const hardYesterday = (current.yesterdaySessions ?? []).some((session) =>
+    isHardTraining(session.type, session.note)
   );
 
   let score = 0;
@@ -445,14 +475,14 @@ function getRecommendation(
   else if (current.energyFeeling <= 3) score -= 2;
   else if (current.energyFeeling <= 4) score -= 1;
 
-  if (current.yesterdayLoad >= 170) score -= 3;
-  else if (current.yesterdayLoad >= 140) score -= 2;
-  else if (current.yesterdayLoad >= 110) score -= 1;
-  else if (current.yesterdayLoad <= 60) score += 1;
+  if (currentTotalLoad >= 170) score -= 3;
+  else if (currentTotalLoad >= 140) score -= 2;
+  else if (currentTotalLoad >= 110) score -= 1;
+  else if (currentTotalLoad <= 60) score += 1;
 
   if (hardYesterday) {
-    if (current.yesterdayLoad >= 140) score -= 2;
-    else if (current.yesterdayLoad >= 100) score -= 1;
+    if (currentTotalLoad >= 140) score -= 2;
+    else if (currentTotalLoad >= 100) score -= 1;
   }
 
   if (avgSleep >= 7.2) score += 1;
@@ -481,7 +511,7 @@ function getRecommendation(
     current.soreness >= 6 ||
     current.energyFeeling <= 3;
 
-  if (hardYesterday && current.yesterdayLoad >= 140 && poorRecovery) {
+  if (hardYesterday && currentTotalLoad >= 140 && poorRecovery) {
     const recoveryPlan =
       current.preferredTraining === "Kraft" ? getMobilityPlan() : getRecoveryRidePlan(zones);
 
@@ -497,7 +527,7 @@ function getRecommendation(
     };
   }
 
-  if (hardYesterday && excellentRecovery && current.yesterdayLoad <= 120 && score >= 5) {
+  if (hardYesterday && excellentRecovery && currentTotalLoad <= 120 && score >= 5) {
     if (current.preferredTraining === "Kraft") {
       const plan = hardYesterday ? getUpperBodyPlan() : getLegPlan();
       return {
@@ -671,8 +701,8 @@ function sanitizeLoadedProfiles(raw: unknown): Profile[] {
         const entry = item as Partial<DayEntry> & { yesterdayTraining?: string };
 
         const mappedType: TrainingType =
-          trainingOptions.includes(entry.yesterdayTrainingType as TrainingType)
-            ? (entry.yesterdayTrainingType as TrainingType)
+          trainingOptions.includes((entry as any).yesterdayTrainingType as TrainingType)
+            ? ((entry as any).yesterdayTrainingType as TrainingType)
             : trainingOptions.includes(entry.yesterdayTraining as TrainingType)
               ? (entry.yesterdayTraining as TrainingType)
               : "Kein Training";
@@ -681,6 +711,22 @@ function sanitizeLoadedProfiles(raw: unknown): Profile[] {
           preferredTrainingOptions.includes(entry.preferredTraining as PreferredTraining)
             ? (entry.preferredTraining as PreferredTraining)
             : "Egal";
+
+        const yesterdaySessions: TrainingSession[] = Array.isArray((entry as any).yesterdaySessions)
+          ? (entry as any).yesterdaySessions.map((session: any) => ({
+            type: trainingOptions.includes(session?.type as TrainingType)
+              ? (session.type as TrainingType)
+              : "Kein Training",
+            note: String(session?.note ?? ""),
+            load: Number(session?.load ?? 0),
+          }))
+          : [
+            {
+              type: mappedType,
+              note: String((entry as any).yesterdayTrainingNote ?? ""),
+              load: Number((entry as any).yesterdayLoad ?? 0),
+            },
+          ];
 
         return {
           date: String(entry.date ?? ""),
@@ -696,9 +742,7 @@ function sanitizeLoadedProfiles(raw: unknown): Profile[] {
           soreness: Number(entry.soreness ?? 0),
           energyFeeling: Number(entry.energyFeeling ?? 5),
           preferredTraining,
-          yesterdayTrainingType: mappedType,
-          yesterdayTrainingNote: String(entry.yesterdayTrainingNote ?? ""),
-          yesterdayLoad: Number(entry.yesterdayLoad ?? 0),
+          yesterdaySessions,
           completedWorkout: Boolean(entry.completedWorkout ?? false),
           completedTrainingType: trainingOptions.includes(entry.completedTrainingType as TrainingType)
             ? (entry.completedTrainingType as TrainingType)
@@ -893,7 +937,14 @@ export default function Home() {
   const avgSleep3 = average(last3.map((entry) => entry.sleepHours)).toFixed(1);
   const avgStress3 = average(last3.map((entry) => entry.stressAvg)).toFixed(0);
   const avgBattery3 = average(last3.map((entry) => entry.bodyBatteryMorning)).toFixed(0);
-  const avgLoad3 = average(last3.map((entry) => entry.yesterdayLoad)).toFixed(0);
+  const avgLoad3 = average(
+    last3.map((entry) =>
+      (entry.yesterdaySessions ?? []).reduce(
+        (sum, session) => sum + Number(session.load || 0),
+        0
+      )
+    )
+  ).toFixed(0);
 
   function updateActiveProfile(updater: (profile: Profile) => Profile) {
     setProfiles((prev) =>
@@ -920,6 +971,44 @@ export default function Home() {
 
   function updateForm<K extends keyof DayEntry>(key: K, value: DayEntry[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
+  }
+
+  function addYesterdaySession() {
+    setForm((prev) => ({
+      ...prev,
+      yesterdaySessions: [
+        ...prev.yesterdaySessions,
+        { type: "Kein Training", note: "", load: 0 },
+      ],
+    }));
+  }
+
+  function updateYesterdaySession(
+    index: number,
+    key: keyof TrainingSession,
+    value: string | number
+  ) {
+    setForm((prev) => ({
+      ...prev,
+      yesterdaySessions: prev.yesterdaySessions.map((session, i) =>
+        i === index
+          ? {
+            ...session,
+            [key]: key === "load" ? Number(value) : value,
+          }
+          : session
+      ),
+    }));
+  }
+
+  function removeYesterdaySession(index: number) {
+    setForm((prev) => ({
+      ...prev,
+      yesterdaySessions:
+        prev.yesterdaySessions.length <= 1
+          ? [{ type: "Kein Training", note: "", load: 0 }]
+          : prev.yesterdaySessions.filter((_, i) => i !== index),
+    }));
   }
 
   function updateFeedback<K extends keyof TrainingFeedbackForm>(
@@ -1030,7 +1119,11 @@ export default function Home() {
       bodyBatteryMorning: Number(form.bodyBatteryMorning),
       soreness: Number(form.soreness),
       energyFeeling: Number(form.energyFeeling),
-      yesterdayLoad: Number(form.yesterdayLoad),
+      yesterdaySessions: (form.yesterdaySessions ?? []).map((session) => ({
+        type: session.type,
+        note: session.note,
+        load: Number(session.load),
+      })),
       completedLoad: Number(form.completedLoad),
       completedDuration: Number(form.completedDuration),
       completedRpe: Number(form.completedRpe),
@@ -1089,7 +1182,7 @@ export default function Home() {
       completedTrainingType:
         prev.completedTrainingType !== "Kein Training"
           ? prev.completedTrainingType
-          : (selectedEntry?.yesterdayTrainingType ?? "Kein Training") as TrainingType,
+          : ((selectedEntry?.yesterdaySessions?.[0]?.type ?? "Kein Training") as TrainingType),
       completedLoad: prev.completedLoad > 0 ? prev.completedLoad : 60,
       completedDuration: durationFallback,
       completedRpe: prev.completedRpe > 0 ? prev.completedRpe : 6,
@@ -1358,7 +1451,13 @@ export default function Home() {
                   <Metric label="Größe" value={heightCm} suffix=" cm" />
                   <Metric label="BMI" value={Number(result.bmi.toFixed(1))} />
                   <Metric label="Training gestern" textValue={getTrainingLabel(selectedEntry)} />
-                  <Metric label="Belastung gestern" value={selectedEntry.yesterdayLoad} />
+                  <Metric
+                    label="Belastung gestern"
+                    value={(selectedEntry.yesterdaySessions ?? []).reduce(
+                      (sum, session) => sum + Number(session.load || 0),
+                      0
+                    )}
+                  />
                   <Metric label="Energiegefühl" value={selectedEntry.energyFeeling} suffix=" /10" />
                   <Metric label="Bevorzugt heute" textValue={selectedEntry.preferredTraining} />
                 </div>
@@ -1435,24 +1534,65 @@ export default function Home() {
                   value={form.energyFeeling}
                   onChange={(v) => updateForm("energyFeeling", Number(v))}
                 />
-                <Field
-                  label="Belastung gestern"
-                  type="number"
-                  value={form.yesterdayLoad}
-                  onChange={(v) => updateForm("yesterdayLoad", Number(v))}
-                />
-                <SelectField
-                  label="Training gestern"
-                  value={form.yesterdayTrainingType}
-                  options={trainingOptions}
-                  onChange={(v) => updateForm("yesterdayTrainingType", v as TrainingType)}
-                />
                 <SelectField
                   label="Heute lieber"
                   value={form.preferredTraining}
                   options={preferredTrainingOptions}
                   onChange={(v) => updateForm("preferredTraining", v as PreferredTraining)}
                 />
+                <div style={{ ...styles.noteItem, gridColumn: "1 / -1" }}>
+                  <strong>Training gestern / mehrere Einheiten</strong>
+                </div>
+
+                <div style={{ gridColumn: "1 / -1", display: "grid", gap: 10 }}>
+                  {form.yesterdaySessions.map((session, index) => (
+                    <div
+                      key={index}
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "1.2fr 1fr auto",
+                        gap: 10,
+                        alignItems: "end",
+                      }}
+                    >
+                      <SelectField
+                        label={`Einheit ${index + 1}`}
+                        value={session.type}
+                        options={trainingOptions}
+                        onChange={(v) => updateYesterdaySession(index, "type", v as TrainingType)}
+                      />
+
+                      <Field
+                        label="Load"
+                        type="number"
+                        value={session.load}
+                        onChange={(v) => updateYesterdaySession(index, "load", Number(v))}
+                      />
+
+                      <button
+                        type="button"
+                        onClick={() => removeYesterdaySession(index)}
+                        style={styles.smallDangerButton}
+                      >
+                        Löschen
+                      </button>
+
+                      <div style={{ gridColumn: "1 / -1" }}>
+                        <Field
+                          label="Notiz"
+                          type="text"
+                          value={session.note}
+                          onChange={(v) => updateYesterdaySession(index, "note", v)}
+                          full
+                        />
+                      </div>
+                    </div>
+                  ))}
+
+                  <button type="button" onClick={addYesterdaySession} style={styles.secondaryButton}>
+                    + Weitere Trainingseinheit
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -1505,13 +1645,6 @@ export default function Home() {
                   type="number"
                   value={form.soreness}
                   onChange={(v) => updateForm("soreness", Number(v))}
-                />
-                <Field
-                  label="Notiz Training gestern"
-                  type="text"
-                  value={form.yesterdayTrainingNote}
-                  onChange={(v) => updateForm("yesterdayTrainingNote", v)}
-                  full
                 />
               </div>
             </div>
@@ -1567,7 +1700,11 @@ export default function Home() {
                           <strong>Training gestern:</strong> {getTrainingLabel(entry)}
                         </div>
                         <div style={styles.historyLine}>
-                          <strong>Belastung gestern:</strong> {entry.yesterdayLoad}
+                          <strong>Belastung gestern:</strong>{" "}
+                          {(entry.yesterdaySessions ?? []).reduce(
+                            (sum, session) => sum + Number(session.load || 0),
+                            0
+                          )}
                         </div>
                         <div style={styles.historyLine}>
                           <strong>Status:</strong> {getCompletionLabel(entry)}
