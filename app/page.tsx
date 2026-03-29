@@ -44,11 +44,14 @@ type LoggedTrainingSession = {
   rpe: number;
   note: string;
 };
+
 type TrainingSession = {
   type: TrainingType;
+  subType: TrainingSubType;
   load: number;
   note: string;
 };
+
 type DayEntry = {
   date: string;
   weight: number;
@@ -177,6 +180,7 @@ const emptyForm: DayEntry = {
   yesterdaySessions: [
     {
       type: "Kein Training",
+      subType: "",
       note: "",
       load: 0,
     },
@@ -210,10 +214,21 @@ function normalize(text: string) {
   return text.toLowerCase().trim();
 }
 
-function isHardTraining(type: TrainingType, note?: string) {
+function isQualitySubType(subType?: string) {
+  const s = normalize(subType ?? "");
+  return s === "intervall" || s === "schwelle";
+}
+
+function isHardTraining(type: TrainingType, subType?: TrainingSubType, note?: string) {
   const t = normalize(type);
+  const s = normalize(subType ?? "");
   const n = normalize(note ?? "");
+
   return (
+    s === "intervall" ||
+    s === "schwelle" ||
+    s === "beine" ||
+    s === "ganzkörper" ||
     t.includes("intervall") ||
     t.includes("schwelle") ||
     t.includes("kraft beine") ||
@@ -249,11 +264,11 @@ function getTrainingLabel(entry: DayEntry) {
 
   return entry.yesterdaySessions
     .map((session) => {
+      const subTypeText = session.subType ? ` – ${session.subType}` : "";
       const note = session.note?.trim();
+      const noteText = note ? ` | ${note}` : "";
       const loadText = session.load > 0 ? ` (Load ${session.load})` : "";
-      return note
-        ? `${session.type} – ${note}${loadText}`
-        : `${session.type}${loadText}`;
+      return `${session.type}${subTypeText}${noteText}${loadText}`;
     })
     .join(" | ");
 }
@@ -373,6 +388,21 @@ function getRecoveryRidePlan(zones: HeartRateZones) {
   };
 }
 
+function countQualitySessionsLast7Days(entries: DayEntry[], selectedDate: string) {
+  const sorted = [...entries].sort(compareDatesAsc);
+  const index = sorted.findIndex((entry) => entry.date === selectedDate);
+  if (index <= 0) return 0;
+
+  const lookbackEntries = sorted.slice(Math.max(0, index - 6), index);
+
+  return lookbackEntries.reduce((sum, entry) => {
+    const countForEntry = (entry.todaySessions ?? []).filter((session) =>
+      isQualitySubType(session.subType)
+    ).length;
+    return sum + countForEntry;
+  }, 0);
+}
+
 function getRecommendation(
   entries: DayEntry[],
   selectedDate: string,
@@ -433,8 +463,11 @@ function getRecommendation(
   );
 
   const hardYesterday = (current.yesterdaySessions ?? []).some((session) =>
-    isHardTraining(session.type, session.note)
+    isHardTraining(session.type, session.subType, session.note)
   );
+
+  const qualitySessionsLast7Days = countQualitySessionsLast7Days(sorted, selectedDate);
+  const qualityLimitReached = qualitySessionsLast7Days >= 2;
 
   let score = 0;
 
@@ -536,7 +569,23 @@ function getRecommendation(
         bmiText: getBmiText(bmi),
         trendHint: "Readiness ist hoch – Qualitätstraining ist vertretbar.",
         ...plan,
-        alternativeWorkout: getThresholdPlan(zones).workoutTitle,
+        alternativeWorkout: qualityLimitReached
+          ? getZone2LongPlan(zones).workoutTitle
+          : getThresholdPlan(zones).workoutTitle,
+      };
+    }
+
+    if (qualityLimitReached) {
+      const plan = getZone2LongPlan(zones);
+      return {
+        ampel: "GELB",
+        recommendation: "ZONE 2",
+        hint: "Erholung ist gut, aber 2 Qualitätseinheiten in 7 Tagen sind bereits erreicht",
+        bmi,
+        bmiText: getBmiText(bmi),
+        trendHint: "Heute Grundlage statt zusätzlicher harter Ausdauereinheit.",
+        ...plan,
+        alternativeWorkout: "Oberkörper Standard",
       };
     }
 
@@ -571,6 +620,20 @@ function getRecommendation(
         trendHint: "Readiness und Verlauf passen für Qualität.",
         ...plan,
         alternativeWorkout: getZone2LongPlan(zones).workoutTitle,
+      };
+    }
+
+    if (qualityLimitReached) {
+      const plan = current.energyFeeling >= 7 ? getZone2LongPlan(zones) : getZone2ShortPlan(zones);
+      return {
+        ampel: "GELB",
+        recommendation: "ZONE 2",
+        hint: "2 Qualitätseinheiten in den letzten 7 Tagen sind schon erreicht",
+        bmi,
+        bmiText: getBmiText(bmi),
+        trendHint: "Heute bewusst Grundlage statt Intervall oder Schwelle.",
+        ...plan,
+        alternativeWorkout: hardYesterday ? "Oberkörper Standard" : "Ganzkörper kurz",
       };
     }
 
@@ -703,17 +766,18 @@ function buildYesterdaysSessionsFromPreviousDay(
 ): TrainingSession[] {
   const previousDate = getPreviousDateString(currentDate);
   if (!previousDate) {
-    return [{ type: "Kein Training", note: "", load: 0 }];
+    return [{ type: "Kein Training", subType: "", note: "", load: 0 }];
   }
 
   const previousEntry = entries.find((entry) => entry.date === previousDate);
 
   if (!previousEntry || !previousEntry.todaySessions || previousEntry.todaySessions.length === 0) {
-    return [{ type: "Kein Training", note: "", load: 0 }];
+    return [{ type: "Kein Training", subType: "", note: "", load: 0 }];
   }
 
   return previousEntry.todaySessions.map((session) => ({
     type: session.type,
+    subType: session.subType ?? "",
     load: Number(session.load || 0),
     note: session.note ?? "",
   }));
@@ -727,9 +791,11 @@ function getTodaySessionsLabel(entry: DayEntry) {
   return entry.todaySessions
     .map((session) => {
       const parts: string[] = [session.type];
+      if (session.subType) parts.push(session.subType);
       if (session.duration > 0) parts.push(`${session.duration} min`);
       if (session.load > 0) parts.push(`Load ${session.load}`);
       if (session.rpe > 0) parts.push(`RPE ${session.rpe}/10`);
+      if (session.note?.trim()) parts.push(session.note.trim());
       return parts.join(" · ");
     })
     .join(" | ");
@@ -778,44 +844,48 @@ function sanitizeLoadedProfiles(raw: unknown): Profile[] {
 
         const yesterdaySessions: TrainingSession[] = Array.isArray((entry as any).yesterdaySessions)
           ? (entry as any).yesterdaySessions.map((session: any) => ({
-            type: trainingOptions.includes(session?.type as TrainingType)
-              ? (session.type as TrainingType)
-              : "Kein Training",
-            note: String(session?.note ?? ""),
-            load: Number(session?.load ?? 0),
-          }))
+              type: trainingOptions.includes(session?.type as TrainingType)
+                ? (session.type as TrainingType)
+                : "Kein Training",
+              subType: String(session?.subType ?? "") as TrainingSubType,
+              note: String(session?.note ?? ""),
+              load: Number(session?.load ?? 0),
+            }))
           : [
-            {
-              type: mappedType,
-              note: String((entry as any).yesterdayTrainingNote ?? ""),
-              load: Number((entry as any).yesterdayLoad ?? 0),
-            },
-          ];
+              {
+                type: mappedType,
+                subType: String((entry as any).yesterdayTrainingSubType ?? "") as TrainingSubType,
+                note: String((entry as any).yesterdayTrainingNote ?? ""),
+                load: Number((entry as any).yesterdayLoad ?? 0),
+              },
+            ];
 
         const migratedTodaySessions: LoggedTrainingSession[] = Array.isArray((entry as any).todaySessions)
           ? (entry as any).todaySessions.map((session: any) => ({
-            type: trainingOptions.includes(session?.type as TrainingType)
-              ? (session.type as TrainingType)
-              : "Kein Training",
-            load: Number(session?.load ?? 0),
-            duration: Number(session?.duration ?? 0),
-            rpe: Number(session?.rpe ?? 0),
-            note: String(session?.note ?? ""),
-          }))
+              type: trainingOptions.includes(session?.type as TrainingType)
+                ? (session.type as TrainingType)
+                : "Kein Training",
+              subType: String(session?.subType ?? "") as TrainingSubType,
+              load: Number(session?.load ?? 0),
+              duration: Number(session?.duration ?? 0),
+              rpe: Number(session?.rpe ?? 0),
+              note: String(session?.note ?? ""),
+            }))
           : Boolean((entry as any).completedWorkout) ||
             Number((entry as any).completedLoad ?? 0) > 0 ||
             Number((entry as any).completedDuration ?? 0) > 0
             ? [
-              {
-                type: trainingOptions.includes((entry as any).completedTrainingType as TrainingType)
-                  ? ((entry as any).completedTrainingType as TrainingType)
-                  : "Kein Training",
-                load: Number((entry as any).completedLoad ?? 0),
-                duration: Number((entry as any).completedDuration ?? 0),
-                rpe: Number((entry as any).completedRpe ?? 0),
-                note: String((entry as any).completedNote ?? ""),
-              },
-            ]
+                {
+                  type: trainingOptions.includes((entry as any).completedTrainingType as TrainingType)
+                    ? ((entry as any).completedTrainingType as TrainingType)
+                    : "Kein Training",
+                  subType: String((entry as any).completedSubType ?? "") as TrainingSubType,
+                  load: Number((entry as any).completedLoad ?? 0),
+                  duration: Number((entry as any).completedDuration ?? 0),
+                  rpe: Number((entry as any).completedRpe ?? 0),
+                  note: String((entry as any).completedNote ?? ""),
+                },
+              ]
             : [];
 
         return {
@@ -862,15 +932,15 @@ function sanitizeLoadedProfiles(raw: unknown): Profile[] {
     const found = loaded.find((p) => p.id === defaultProfile.id);
     return found
       ? {
-        ...defaultProfile,
-        ...found,
-        entries: found.entries ?? [],
-        heightCm: found.heightCm || defaultProfile.heightCm,
-        zones: {
-          ...defaultProfile.zones,
-          ...(found.zones ?? {}),
-        },
-      }
+          ...defaultProfile,
+          ...found,
+          entries: found.entries ?? [],
+          heightCm: found.heightCm || defaultProfile.heightCm,
+          zones: {
+            ...defaultProfile.zones,
+            ...(found.zones ?? {}),
+          },
+        }
       : defaultProfile;
   });
 
@@ -906,6 +976,7 @@ function getLoadLabel(load: number) {
   if (load < 120) return "mittel";
   return "hart";
 }
+
 function getSorenessPenalty(soreness: number): number {
   if (soreness >= 9) return 30;
   if (soreness >= 8) return 24;
@@ -957,6 +1028,7 @@ function getsorenessOverride(
 
   return null;
 }
+
 export default function Home() {
   const [profiles, setProfiles] = useState<Profile[]>(defaultProfiles);
   const [activeProfileId, setActiveProfileId] = useState<string>("mario");
@@ -969,6 +1041,7 @@ export default function Home() {
     ...emptyForm,
     date: getTodayDateString(),
   });
+
   useEffect(() => {
     try {
       const rawProfiles = localStorage.getItem(STORAGE_KEY);
@@ -1109,9 +1182,9 @@ export default function Home() {
       yesterdaySessions: prev.yesterdaySessions.map((session, i) =>
         i === index
           ? {
-            ...session,
-            [key]: key === "load" ? Number(value) : value,
-          }
+              ...session,
+              [key]: key === "load" ? Number(value) : value,
+            }
           : session
       ),
     }));
@@ -1144,9 +1217,9 @@ export default function Home() {
       todaySessions: prev.todaySessions.map((session, i) =>
         i === index
           ? {
-            ...session,
-            [key]: value,
-          }
+              ...session,
+              [key]: value,
+            }
           : session
       ),
     }));
@@ -1264,12 +1337,13 @@ export default function Home() {
       energyFeeling: Number(form.energyFeeling),
       yesterdaySessions: (form.yesterdaySessions ?? []).map((session) => ({
         type: session.type,
+        subType: session.subType ?? "",
         note: session.note,
         load: Number(session.load),
       })),
       todaySessions: (form.todaySessions ?? []).map((session) => ({
         type: session.type,
-        subType: "",
+        subType: session.subType ?? "",
         load: Number(session.load),
         duration: Number(session.duration),
         rpe: Number(session.rpe),
@@ -1298,9 +1372,7 @@ export default function Home() {
           <div>
             <div style={styles.kicker}>Trainings-App</div>
             <h1 style={styles.title}>PeakForm</h1>
-            <p style={styles.subtitle}>
-              Train smarter. Perform better
-            </p>
+            <p style={styles.subtitle}>Train smarter. Perform better</p>
           </div>
           <div style={styles.headerIcon}>
             <img
@@ -1313,7 +1385,6 @@ export default function Home() {
                 borderRadius: 8,
               }}
             />
-
           </div>
         </section>
 
@@ -1399,9 +1470,12 @@ export default function Home() {
                 <span
                   style={{
                     ...styles.statusBadge,
-                    background: (selectedEntry?.todaySessions?.length ?? 0) > 0 ? "#dcfce7" : "#f8fafc",
-                    color: (selectedEntry?.todaySessions?.length ?? 0) > 0 ? "#166534" : "#475569",
-                    borderColor: (selectedEntry?.todaySessions?.length ?? 0) > 0 ? "#86efac" : "#cbd5e1",
+                    background:
+                      (selectedEntry?.todaySessions?.length ?? 0) > 0 ? "#dcfce7" : "#f8fafc",
+                    color:
+                      (selectedEntry?.todaySessions?.length ?? 0) > 0 ? "#166534" : "#475569",
+                    borderColor:
+                      (selectedEntry?.todaySessions?.length ?? 0) > 0 ? "#86efac" : "#cbd5e1",
                   }}
                 >
                   {(selectedEntry?.todaySessions?.length ?? 0) > 0
@@ -1471,7 +1545,8 @@ export default function Home() {
                 </div>
               ) : (
                 <div style={styles.emptyBox}>
-                  Noch keine Tagesdaten für {activeProfile?.name} vorhanden. Bitte unter Eingabe starten.
+                  Noch keine Tagesdaten für {activeProfile?.name} vorhanden. Bitte unter Eingabe
+                  starten.
                 </div>
               )}
             </section>
@@ -1585,7 +1660,7 @@ export default function Home() {
                       key={index}
                       style={{
                         display: "grid",
-                        gridTemplateColumns: "1.2fr 1fr",
+                        gridTemplateColumns: "1fr 1fr",
                         gap: 10,
                         alignItems: "end",
                       }}
@@ -1596,6 +1671,19 @@ export default function Home() {
                         options={trainingOptions}
                         onChange={(v) => updateYesterdaySession(index, "type", v as TrainingType)}
                       />
+
+                      {session.type !== "Kein Training" ? (
+                        <SelectField
+                          label="Art"
+                          value={session.subType}
+                          options={subTrainingOptions[session.type]}
+                          onChange={(v) =>
+                            updateYesterdaySession(index, "subType", v as TrainingSubType)
+                          }
+                        />
+                      ) : (
+                        <div />
+                      )}
 
                       <Field
                         label="Load"
@@ -1617,13 +1705,21 @@ export default function Home() {
                   ))}
 
                   <div style={styles.noteItem}>
-                    Wenn gestern kein Training erfasst wurde, steht hier automatisch „Kein Training“.
+                    Wenn gestern kein Training erfasst wurde, steht hier automatisch „Kein
+                    Training“.
                   </div>
                 </div>
               </div>
             </div>
 
-            <div style={{ ...styles.card, background: "#ecfeff", borderColor: "#a5f3fc", marginTop: 12 }}>
+            <div
+              style={{
+                ...styles.card,
+                background: "#ecfeff",
+                borderColor: "#a5f3fc",
+                marginTop: 12,
+              }}
+            >
               <h4 style={{ margin: 0, marginBottom: 10 }}>Heute erfasste Trainings</h4>
               <p style={{ ...styles.cardText, marginTop: 0 }}>
                 Diese Einheiten speicherst du heute. Morgen werden sie automatisch als
@@ -1635,7 +1731,7 @@ export default function Home() {
                   <strong>Pflichtfelder:</strong> Trainingsart, Belastungswert, Dauer, RPE
                 </div>
                 <div style={styles.noteItem}>
-                  <strong>Optional:</strong> Notiz
+                  <strong>Optional:</strong> Unterart und Notiz
                 </div>
               </div>
 
@@ -1917,9 +2013,21 @@ export default function Home() {
             <section style={styles.card}>
               <h3 style={styles.cardTitle}>Hinterlegte Einheiten</h3>
               <div style={styles.ruleList}>
-                <Rule color="#dcfce7" title="GRUEN" text="Intervall 5×3, Schwelle 3×8, Beine oder Ganzkörper" />
-                <Rule color="#fef9c3" title="GELB" text="Zone 2 kurz/lang, Oberkörper oder Ganzkörper moderat" />
-                <Rule color="#fee2e2" title="ROT" text="Lockeres Rad, Spaziergang oder Mobility" />
+                <Rule
+                  color="#dcfce7"
+                  title="GRUEN"
+                  text="Intervall 5×3, Schwelle 3×8, Beine oder Ganzkörper"
+                />
+                <Rule
+                  color="#fef9c3"
+                  title="GELB"
+                  text="Zone 2 kurz/lang, Oberkörper oder Ganzkörper moderat"
+                />
+                <Rule
+                  color="#fee2e2"
+                  title="ROT"
+                  text="Lockeres Rad, Spaziergang oder Mobility"
+                />
               </div>
             </section>
 
@@ -1931,7 +2039,10 @@ export default function Home() {
                   Heute erfasste Trainings werden morgen automatisch als Vortagstraining übernommen
                 </div>
                 <div style={styles.noteItem}>
-                  Mehrere Einheiten pro Tag mit Dauer, Load, RPE und Notiz sind jetzt möglich
+                  Intervall und Schwelle sind jetzt auf maximal 2 Qualitätseinheiten pro 7 Tage begrenzt
+                </div>
+                <div style={styles.noteItem}>
+                  Mehrere Einheiten pro Tag mit Art, Dauer, Load, RPE und Notiz sind jetzt möglich
                 </div>
               </div>
             </section>
@@ -2029,11 +2140,31 @@ export default function Home() {
         )}
 
         <nav style={styles.tabBarFive}>
-          <TabButton label="Heute" active={activeTab === "heute"} onClick={() => setActiveTab("heute")} />
-          <TabButton label="Eingabe" active={activeTab === "eingabe"} onClick={() => setActiveTab("eingabe")} />
-          <TabButton label="Verlauf" active={activeTab === "verlauf"} onClick={() => setActiveTab("verlauf")} />
-          <TabButton label="Analyse" active={activeTab === "analyse"} onClick={() => setActiveTab("analyse")} />
-          <TabButton label="Zonen" active={activeTab === "zonen"} onClick={() => setActiveTab("zonen")} />
+          <TabButton
+            label="Heute"
+            active={activeTab === "heute"}
+            onClick={() => setActiveTab("heute")}
+          />
+          <TabButton
+            label="Eingabe"
+            active={activeTab === "eingabe"}
+            onClick={() => setActiveTab("eingabe")}
+          />
+          <TabButton
+            label="Verlauf"
+            active={activeTab === "verlauf"}
+            onClick={() => setActiveTab("verlauf")}
+          />
+          <TabButton
+            label="Analyse"
+            active={activeTab === "analyse"}
+            onClick={() => setActiveTab("analyse")}
+          />
+          <TabButton
+            label="Zonen"
+            active={activeTab === "zonen"}
+            onClick={() => setActiveTab("zonen")}
+          />
         </nav>
       </div>
     </main>
@@ -2105,7 +2236,7 @@ function SelectField({
       <select value={value} onChange={(e) => onChange(e.target.value)} style={styles.input}>
         {options.map((option) => (
           <option key={option} value={option}>
-            {option}
+            {option || "Bitte wählen"}
           </option>
         ))}
       </select>
