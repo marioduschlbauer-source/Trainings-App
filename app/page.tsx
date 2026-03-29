@@ -1695,7 +1695,20 @@ export default function Home() {
 
                       <SelectField
                         label="Anstrengung"
-                        value={String(session.rpe)}
+                        value={
+                          [
+                            "1 - sehr leicht",
+                            "2 - leicht",
+                            "3 - locker",
+                            "4 - moderat",
+                            "5 - etwas anstrengend",
+                            "6 - anstrengend",
+                            "7 - hart",
+                            "8 - sehr hart",
+                            "9 - extrem",
+                            "10 - maximal",
+                          ][session.rpe - 1] ?? "1 - sehr leicht"
+                        }
                         options={[
                           "1 - sehr leicht",
                           "2 - leicht",
