@@ -4,35 +4,51 @@ import { useEffect, useMemo, useState, type CSSProperties } from "react";
 
 type TrainingType =
   | "Kein Training"
+  | "Rad"
+  | "Laufen"
+  | "Kraft"
+  | "Erholung"
+  | "Sonstiges";
+
+type TrainingSubType =
+  | ""
+  | "Erholung"
+  | "Locker (Zone 2)"
+  | "Zügig"
+  | "Schwelle"
+  | "Intervall"
   | "Ruhetag"
   | "Spaziergang"
-  | "Walken"
-  | "Laufen"
-  | "Zone 2"
-  | "Intervall"
-  | "Schwelle"
-  | "Kraft Oberkörper"
-  | "Kraft Beine"
-  | "Kraft Ganzkörper"
+  | "Oberkörper"
+  | "Beine"
+  | "Ganzkörper"
   | "Mobility"
   | "Sonstiges";
 
 type PreferredTraining = "Egal" | "Rad" | "Laufen" | "Walken" | "Spaziergang" | "Kraft";
 
-type TrainingSession = {
+type TodaySession = {
   type: TrainingType;
-  note: string;
-  load: number;
-};
-
-type LoggedTrainingSession = {
-  type: TrainingType;
+  subType: TrainingSubType;
   load: number;
   duration: number;
   rpe: number;
   note: string;
 };
 
+type LoggedTrainingSession = {
+  type: TrainingType;
+  subType: TrainingSubType;
+  load: number;
+  duration: number;
+  rpe: number;
+  note: string;
+};
+type TrainingSession = {
+  type: TrainingType;
+  load: number;
+  note: string;
+};
 type DayEntry = {
   date: string;
   weight: number;
@@ -93,19 +109,21 @@ const ACTIVE_PROFILE_KEY = "mario-coach-active-profile-v2";
 
 const trainingOptions: TrainingType[] = [
   "Kein Training",
-  "Ruhetag",
-  "Spaziergang",
-  "Walken",
+  "Rad",
   "Laufen",
-  "Zone 2",
-  "Intervall",
-  "Schwelle",
-  "Kraft Oberkörper",
-  "Kraft Beine",
-  "Kraft Ganzkörper",
-  "Mobility",
+  "Kraft",
+  "Erholung",
   "Sonstiges",
 ];
+
+const subTrainingOptions: Record<TrainingType, TrainingSubType[]> = {
+  "Kein Training": [""],
+  Rad: ["Erholung", "Locker (Zone 2)", "Zügig", "Schwelle", "Intervall"],
+  Laufen: ["Spaziergang", "Locker (Zone 2)", "Zügig", "Schwelle", "Intervall"],
+  Kraft: ["Oberkörper", "Beine", "Ganzkörper"],
+  Erholung: ["Ruhetag", "Spaziergang", "Mobility"],
+  Sonstiges: ["Sonstiges"],
+};
 
 const preferredTrainingOptions: PreferredTraining[] = [
   "Egal",
@@ -398,6 +416,16 @@ function getRecommendation(
   );
 
   const bmi = calcBmi(current.weight, heightCm);
+  const sorenessOverride = getsorenessOverride(
+    current.soreness,
+    current.preferredTraining,
+    bmi,
+    zones
+  );
+
+  if (sorenessOverride) {
+    return sorenessOverride;
+  }
 
   const currentTotalLoad = (current.yesterdaySessions ?? []).reduce(
     (sum, session) => sum + Number(session.load || 0),
@@ -438,9 +466,7 @@ function getRecommendation(
   if (current.stressAvg <= 25) score += 1;
   else if (current.stressAvg >= 40) score -= 1;
 
-  if (current.soreness <= 2) score += 1;
-  else if (current.soreness >= 6) score -= 2;
-  else if (current.soreness >= 4) score -= 1;
+  score -= getSorenessPenalty(current.soreness);
 
   if (current.energyFeeling >= 8) score += 2;
   else if (current.energyFeeling >= 6) score += 1;
@@ -671,7 +697,7 @@ function getPreviousDateString(date: string) {
   return new Date(d.getTime() - offsetMs).toISOString().slice(0, 10);
 }
 
-function buildYesterdaySessionsFromPreviousDay(
+function buildYesterdaysSessionsFromPreviousDay(
   entries: DayEntry[],
   currentDate: string
 ): TrainingSession[] {
@@ -880,7 +906,57 @@ function getLoadLabel(load: number) {
   if (load < 120) return "mittel";
   return "hart";
 }
+function getSorenessPenalty(soreness: number): number {
+  if (soreness >= 9) return 30;
+  if (soreness >= 8) return 24;
+  if (soreness >= 7) return 18;
+  if (soreness >= 6) return 12;
+  if (soreness >= 5) return 8;
+  if (soreness >= 4) return 5;
+  if (soreness >= 3) return 2;
+  return 0;
+}
 
+function getsorenessOverride(
+  soreness: number,
+  preferredTraining: PreferredTraining,
+  bmi: number,
+  zones: HeartRateZones
+): Recommendation | null {
+  if (soreness >= 8) {
+    const recoveryPlan =
+      preferredTraining === "Kraft" ? getMobilityPlan() : getRecoveryRidePlan(zones);
+
+    return {
+      ampel: "ROT",
+      recommendation: "REGENERATION",
+      hint: "Starker Muskelkater – heute keine harte oder beinlastige Einheit",
+      bmi,
+      bmiText: getBmiText(bmi),
+      trendHint: "Muskulatur ist noch nicht bereit für Intensität.",
+      ...recoveryPlan,
+      alternativeWorkout: "Kompletter Ruhetag",
+    };
+  }
+
+  if (soreness >= 6) {
+    const moderatePlan =
+      preferredTraining === "Kraft" ? getUpperBodyPlan() : getZone2ShortPlan(zones);
+
+    return {
+      ampel: "GELB",
+      recommendation: preferredTraining === "Kraft" ? "KRAFT MODERAT" : "LOCKER TRAINIEREN",
+      hint: "Deutlicher Muskelkater – heute kein Intervall, keine Schwelle, kein Beintraining",
+      bmi,
+      bmiText: getBmiText(bmi),
+      trendHint: "Heute locker bleiben und muskulär erholen.",
+      ...moderatePlan,
+      alternativeWorkout: "Mobility + Spaziergang",
+    };
+  }
+
+  return null;
+}
 export default function Home() {
   const [profiles, setProfiles] = useState<Profile[]>(defaultProfiles);
   const [activeProfileId, setActiveProfileId] = useState<string>("mario");
@@ -893,7 +969,6 @@ export default function Home() {
     ...emptyForm,
     date: getTodayDateString(),
   });
-
   useEffect(() => {
     try {
       const rawProfiles = localStorage.getItem(STORAGE_KEY);
@@ -957,7 +1032,7 @@ export default function Home() {
 
     setForm((prev) => ({
       ...prev,
-      yesterdaySessions: buildYesterdaySessionsFromPreviousDay(entries, prev.date),
+      yesterdaySessions: buildYesterdaysSessionsFromPreviousDay(entries, prev.date),
     }));
   }, [form.date, entries, editingDate]);
 
@@ -1049,6 +1124,7 @@ export default function Home() {
         ...prev.todaySessions,
         {
           type: "Kein Training",
+          subType: "",
           load: 0,
           duration: 0,
           rpe: 0,
@@ -1061,7 +1137,7 @@ export default function Home() {
   function updateTodaySession(
     index: number,
     key: keyof LoggedTrainingSession,
-    value: string | number
+    value: LoggedTrainingSession[keyof LoggedTrainingSession]
   ) {
     setForm((prev) => ({
       ...prev,
@@ -1069,10 +1145,7 @@ export default function Home() {
         i === index
           ? {
             ...session,
-            [key]:
-              key === "load" || key === "duration" || key === "rpe"
-                ? Number(value)
-                : value,
+            [key]: value,
           }
           : session
       ),
@@ -1123,7 +1196,7 @@ export default function Home() {
     setForm({
       ...latest,
       date: newDate,
-      yesterdaySessions: buildYesterdaySessionsFromPreviousDay(entries, newDate),
+      yesterdaySessions: buildYesterdaysSessionsFromPreviousDay(entries, newDate),
       todaySessions: [],
     });
     setEditingDate(null);
@@ -1142,7 +1215,7 @@ export default function Home() {
     setForm({
       ...entry,
       date: newDate,
-      yesterdaySessions: buildYesterdaySessionsFromPreviousDay(entries, newDate),
+      yesterdaySessions: buildYesterdaysSessionsFromPreviousDay(entries, newDate),
       todaySessions: [],
     });
     setEditingDate(null);
@@ -1196,6 +1269,7 @@ export default function Home() {
       })),
       todaySessions: (form.todaySessions ?? []).map((session) => ({
         type: session.type,
+        subType: "",
         load: Number(session.load),
         duration: Number(session.duration),
         rpe: Number(session.rpe),
@@ -1239,7 +1313,7 @@ export default function Home() {
                 borderRadius: 8,
               }}
             />
-            
+
           </div>
         </section>
 
@@ -1583,25 +1657,60 @@ export default function Home() {
                         label={`Einheit ${index + 1}`}
                         value={session.type}
                         options={trainingOptions}
-                        onChange={(v) => updateTodaySession(index, "type", v as TrainingType)}
+                        onChange={(v) => {
+                          const nextType = v as TrainingType;
+                          updateTodaySession(index, "type", nextType);
+                          updateTodaySession(index, "subType", "");
+                        }}
                       />
+
+                      {session.type !== "Kein Training" && (
+                        <SelectField
+                          label="Art"
+                          value={session.subType}
+                          options={subTrainingOptions[session.type]}
+                          onChange={(v) =>
+                            updateTodaySession(index, "subType", v as TrainingSubType)
+                          }
+                        />
+                      )}
+
                       <Field
                         label="Belastungswert"
                         type="number"
-                        value={session.load}
-                        onChange={(v) => updateTodaySession(index, "load", Number(v))}
+                        value={session.load === 0 ? "" : String(session.load)}
+                        onChange={(v) =>
+                          updateTodaySession(index, "load", v === "" ? 0 : Number(v))
+                        }
                       />
+
                       <Field
                         label="Dauer (min)"
                         type="number"
-                        value={session.duration}
-                        onChange={(v) => updateTodaySession(index, "duration", Number(v))}
+                        value={session.duration === 0 ? "" : String(session.duration)}
+                        onChange={(v) =>
+                          updateTodaySession(index, "duration", v === "" ? 0 : Number(v))
+                        }
                       />
-                      <Field
-                        label="RPE (1-10)"
-                        type="number"
-                        value={session.rpe}
-                        onChange={(v) => updateTodaySession(index, "rpe", Number(v))}
+
+                      <SelectField
+                        label="Anstrengung"
+                        value={String(session.rpe)}
+                        options={[
+                          "1 - sehr leicht",
+                          "2 - leicht",
+                          "3 - locker",
+                          "4 - moderat",
+                          "5 - etwas anstrengend",
+                          "6 - anstrengend",
+                          "7 - hart",
+                          "8 - sehr hart",
+                          "9 - extrem",
+                          "10 - maximal",
+                        ]}
+                        onChange={(v) =>
+                          updateTodaySession(index, "rpe", Number(v.split(" - ")[0]))
+                        }
                       />
                     </div>
 
