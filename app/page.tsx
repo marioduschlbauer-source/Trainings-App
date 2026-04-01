@@ -84,6 +84,10 @@ type Recommendation = {
   heartRateText: string;
   strengthFocus: string;
   alternativeWorkout: string;
+  coachShort: string;
+  whyToday: string;
+  avoidToday: string;
+  intensityLevel: "LEICHT" | "NORMAL" | "HOCH";
 };
 
 type HeartRateZones = {
@@ -403,6 +407,104 @@ function countQualitySessionsLast7Days(entries: DayEntry[], selectedDate: string
   }, 0);
 }
 
+function getRecoveryLabel(score: number) {
+  if (score >= 6) return "hoch";
+  if (score >= 3) return "solide";
+  return "niedrig";
+}
+
+function getSorenessLabel(soreness: number) {
+  if (soreness >= 7) return "hoch";
+  if (soreness >= 4) return "mittel";
+  return "niedrig";
+}
+
+function getIntensityLevel(
+  score: number,
+  currentTotalLoad: number,
+  soreness: number,
+  hardYesterday: boolean
+): "LEICHT" | "NORMAL" | "HOCH" {
+  if (soreness >= 6) return "LEICHT";
+  if (hardYesterday && currentTotalLoad >= 120) return "LEICHT";
+  if (score >= 8 && currentTotalLoad <= 90 && soreness <= 2) return "HOCH";
+  return "NORMAL";
+}
+
+function buildWhyTodayText(
+  score: number,
+  current: DayEntry,
+  currentTotalLoad: number,
+  hardYesterday: boolean
+) {
+  const parts: string[] = [];
+
+  parts.push(`Erholung ${getRecoveryLabel(score)}`);
+  parts.push(`Muskelkater ${getSorenessLabel(current.soreness)}`);
+
+  if (current.bodyBatteryMorning >= 75) parts.push("Body Battery gut");
+  else if (current.bodyBatteryMorning < 55) parts.push("Body Battery niedrig");
+
+  if (current.sleepScore >= 80) parts.push("Schlaf gut");
+  else if (current.sleepScore < 70) parts.push("Schlaf schwächer");
+
+  if (hardYesterday) {
+    parts.push(`Vortag hart (${currentTotalLoad})`);
+  } else if (currentTotalLoad > 0) {
+    parts.push(`Vortag moderat (${currentTotalLoad})`);
+  } else {
+    parts.push("Vortag leicht");
+  }
+
+  return parts.join(" · ");
+}
+
+function buildAvoidTodayText(
+  recommendation: string,
+  preferredTraining: PreferredTraining,
+  hardYesterday: boolean,
+  soreness: number,
+  qualityLimitReached: boolean
+) {
+  if (soreness >= 6) return "Heute keine harten Intervalle und kein Beintraining";
+  if (qualityLimitReached) return "Heute keine zusätzliche harte Qualitätseinheit";
+  if (recommendation.includes("INTERVALL")) {
+    return "Nicht zu hart anlaufen und kein Zusatz-Beintraining";
+  }
+  if (recommendation.includes("QUALITÄT")) {
+    return "Heute nicht all-out gehen und kein Zusatz-Beintraining";
+  }
+  if (recommendation.includes("SCHWELLE")) {
+    return "Nicht überziehen und keine zweite harte Einheit";
+  }
+  if (recommendation.includes("ZONE 2")) return "Heute nicht in Zone 4–5 eskalieren";
+  if (preferredTraining === "Kraft" && hardYesterday) return "Heute kein schweres Beintraining";
+  return "Heute nicht all-out gehen";
+}
+
+function buildBaseRecommendation(
+  current: DayEntry,
+  bmi: number,
+  score: number,
+  currentTotalLoad: number,
+  hardYesterday: boolean,
+  qualityLimitReached: boolean
+) {
+  return {
+    bmi,
+    bmiText: getBmiText(bmi),
+    whyToday: buildWhyTodayText(score, current, currentTotalLoad, hardYesterday),
+    intensityLevel: getIntensityLevel(score, currentTotalLoad, current.soreness, hardYesterday),
+    avoidToday: buildAvoidTodayText(
+      "",
+      current.preferredTraining,
+      hardYesterday,
+      current.soreness,
+      qualityLimitReached
+    ) as string,
+  };
+}
+
 function getRecommendation(
   entries: DayEntry[],
   selectedDate: string,
@@ -427,6 +529,10 @@ function getRecommendation(
       heartRateText: "-",
       strengthFocus: "-",
       alternativeWorkout: "-",
+      coachShort: "Erst Daten eingeben, dann kann die App sauber coachen.",
+      whyToday: "Noch keine Daten vorhanden",
+      avoidToday: "Ohne Tagesdaten keine harte Einheit erzwingen",
+      intensityLevel: "LEICHT",
     };
   }
 
@@ -446,17 +552,6 @@ function getRecommendation(
   );
 
   const bmi = calcBmi(current.weight, heightCm);
-  const sorenessOverride = getsorenessOverride(
-    current.soreness,
-    current.preferredTraining,
-    bmi,
-    zones
-  );
-
-  if (sorenessOverride) {
-    return sorenessOverride;
-  }
-
   const currentTotalLoad = (current.yesterdaySessions ?? []).reduce(
     (sum, session) => sum + Number(session.load || 0),
     0
@@ -526,6 +621,22 @@ function getRecommendation(
   if (bmi >= 30) score -= 1;
   if (current.waist >= 105) score -= 1;
 
+  const sorenessOverride = getsorenessOverride(
+    current.soreness,
+    current.preferredTraining,
+    bmi,
+    zones,
+    score,
+    currentTotalLoad,
+    hardYesterday,
+    qualityLimitReached,
+    current
+  );
+
+  if (sorenessOverride) {
+    return sorenessOverride;
+  }
+
   const excellentRecovery =
     current.bodyBatteryMorning >= 72 &&
     current.sleepScore >= 78 &&
@@ -550,56 +661,115 @@ function getRecommendation(
       ampel: "ROT",
       recommendation: "REGENERATION",
       hint: "Gestern war hart und die Erholung heute ist nicht gut genug",
-      bmi,
-      bmiText: getBmiText(bmi),
       trendHint: "Heute zuerst regenerieren, dann wieder Qualität.",
       ...recoveryPlan,
       alternativeWorkout: "Kompletter Ruhetag",
+      coachShort: "Heute Erholung priorisieren – Qualität würde wenig bringen.",
+      ...buildBaseRecommendation(
+        current,
+        bmi,
+        score,
+        currentTotalLoad,
+        hardYesterday,
+        qualityLimitReached
+      ),
+      avoidToday: buildAvoidTodayText(
+        "REGENERATION",
+        current.preferredTraining,
+        hardYesterday,
+        current.soreness,
+        qualityLimitReached
+      ),
     };
   }
 
   if (hardYesterday && excellentRecovery && currentTotalLoad <= 120 && score >= 5) {
     if (current.preferredTraining === "Kraft") {
       const plan = hardYesterday ? getUpperBodyPlan() : getLegPlan();
+
       return {
         ampel: "GRUEN",
         recommendation: "KRAFT",
         hint: "Trotz hartem Vortag sind Erholung und Tagesform heute stark",
-        bmi,
-        bmiText: getBmiText(bmi),
         trendHint: "Readiness ist hoch – Qualitätstraining ist vertretbar.",
         ...plan,
         alternativeWorkout: qualityLimitReached
           ? getZone2LongPlan(zones).workoutTitle
           : getThresholdPlan(zones).workoutTitle,
+        coachShort: "Körper belastbar – heute ist ein starker Reiz möglich.",
+        ...buildBaseRecommendation(
+          current,
+          bmi,
+          score,
+          currentTotalLoad,
+          hardYesterday,
+          qualityLimitReached
+        ),
+        avoidToday: buildAvoidTodayText(
+          "KRAFT",
+          current.preferredTraining,
+          hardYesterday,
+          current.soreness,
+          qualityLimitReached
+        ),
       };
     }
 
     if (qualityLimitReached) {
       const plan = getZone2LongPlan(zones);
+
       return {
         ampel: "GELB",
         recommendation: "ZONE 2",
         hint: "Erholung ist gut, aber 2 Qualitätseinheiten in 7 Tagen sind bereits erreicht",
-        bmi,
-        bmiText: getBmiText(bmi),
         trendHint: "Heute Grundlage statt zusätzlicher harter Ausdauereinheit.",
         ...plan,
         alternativeWorkout: "Oberkörper Standard",
+        coachShort: "Gute Form, aber heute besser Grundlage statt weiterer Qualität.",
+        ...buildBaseRecommendation(
+          current,
+          bmi,
+          score,
+          currentTotalLoad,
+          hardYesterday,
+          qualityLimitReached
+        ),
+        avoidToday: buildAvoidTodayText(
+          "ZONE 2",
+          current.preferredTraining,
+          hardYesterday,
+          current.soreness,
+          qualityLimitReached
+        ),
       };
     }
 
     const plan = current.energyFeeling >= 8 ? getIntervalPlan(zones) : getThresholdPlan(zones);
+    const recommendation = current.energyFeeling >= 8 ? "INTERVALL" : "QUALITÄT";
 
     return {
       ampel: "GRUEN",
-      recommendation: "QUALITÄT",
+      recommendation,
       hint: "Trotz hartem Vortag sind Erholung und Tagesform heute stark",
-      bmi,
-      bmiText: getBmiText(bmi),
       trendHint: "Readiness ist hoch – Qualitätstraining ist vertretbar.",
       ...plan,
       alternativeWorkout: "Oberkörper Standard",
+      coachShort: "Guter Tag für Qualität – kontrolliert hart fahren.",
+      ...buildBaseRecommendation(
+        current,
+        bmi,
+        score,
+        currentTotalLoad,
+        hardYesterday,
+        qualityLimitReached
+      ),
+      avoidToday: buildAvoidTodayText(
+        recommendation,
+        current.preferredTraining,
+        hardYesterday,
+        current.soreness,
+        qualityLimitReached
+      ),
     };
   }
 
@@ -615,57 +785,116 @@ function getRecommendation(
         ampel: "GRUEN",
         recommendation: "KRAFT",
         hint: "Körper bereit für starken Trainingsreiz",
-        bmi,
-        bmiText: getBmiText(bmi),
         trendHint: "Readiness und Verlauf passen für Qualität.",
         ...plan,
         alternativeWorkout: getZone2LongPlan(zones).workoutTitle,
+        coachShort: "Körper belastbar – heute ist ein starker Reiz möglich.",
+        ...buildBaseRecommendation(
+          current,
+          bmi,
+          score,
+          currentTotalLoad,
+          hardYesterday,
+          qualityLimitReached
+        ),
+        avoidToday: buildAvoidTodayText(
+          "KRAFT",
+          current.preferredTraining,
+          hardYesterday,
+          current.soreness,
+          qualityLimitReached
+        ),
       };
     }
 
     if (qualityLimitReached) {
       const plan = current.energyFeeling >= 7 ? getZone2LongPlan(zones) : getZone2ShortPlan(zones);
+
       return {
         ampel: "GELB",
         recommendation: "ZONE 2",
         hint: "2 Qualitätseinheiten in den letzten 7 Tagen sind schon erreicht",
-        bmi,
-        bmiText: getBmiText(bmi),
         trendHint: "Heute bewusst Grundlage statt Intervall oder Schwelle.",
         ...plan,
         alternativeWorkout: hardYesterday ? "Oberkörper Standard" : "Ganzkörper kurz",
+        coachShort: "Heute lieber sauber arbeiten als noch eine harte Einheit erzwingen.",
+        ...buildBaseRecommendation(
+          current,
+          bmi,
+          score,
+          currentTotalLoad,
+          hardYesterday,
+          qualityLimitReached
+        ),
+        avoidToday: buildAvoidTodayText(
+          "ZONE 2",
+          current.preferredTraining,
+          hardYesterday,
+          current.soreness,
+          qualityLimitReached
+        ),
       };
     }
 
     const plan = current.energyFeeling >= 8 ? getIntervalPlan(zones) : getThresholdPlan(zones);
+    const recommendation = current.energyFeeling >= 8 ? "INTERVALL" : "QUALITÄT";
 
     return {
       ampel: "GRUEN",
-      recommendation: "INTERVALL",
+      recommendation,
       hint: "Körper bereit für harten Reiz",
-      bmi,
-      bmiText: getBmiText(bmi),
       trendHint: "Readiness und Verlauf passen für Qualität.",
       ...plan,
       alternativeWorkout: hardYesterday ? "Oberkörper Standard" : "Zone 2 lang",
+      coachShort: "Guter Tag für Qualität – kontrolliert hart fahren.",
+      ...buildBaseRecommendation(
+        current,
+        bmi,
+        score,
+        currentTotalLoad,
+        hardYesterday,
+        qualityLimitReached
+      ),
+      avoidToday: buildAvoidTodayText(
+        recommendation,
+        current.preferredTraining,
+        hardYesterday,
+        current.soreness,
+        qualityLimitReached
+      ),
     };
   }
 
   if (score >= 3) {
     if (current.preferredTraining === "Kraft") {
       const plan = hardYesterday ? getUpperBodyPlan() : getFullBodyShortPlan();
+
       return {
         ampel: "GELB",
         recommendation: "KRAFT MODERAT",
         hint: hardYesterday
           ? "Gestern war fordernd – heute eher kontrolliert statt Vollgas"
           : "Heute kontrolliert trainieren und Reserven nicht komplett verbrauchen",
-        bmi,
-        bmiText: getBmiText(bmi),
         trendHint:
           avgSleep < 7 ? "Schlaftrend bremst heute etwas." : "Solide Basis, aber nicht Vollgas.",
         ...plan,
         alternativeWorkout: getZone2ShortPlan(zones).workoutTitle,
+        coachShort: "Solider Tag – heute lieber kontrolliert statt maximal.",
+        ...buildBaseRecommendation(
+          current,
+          bmi,
+          score,
+          currentTotalLoad,
+          hardYesterday,
+          qualityLimitReached
+        ),
+        avoidToday: buildAvoidTodayText(
+          "KRAFT MODERAT",
+          current.preferredTraining,
+          hardYesterday,
+          current.soreness,
+          qualityLimitReached
+        ),
       };
     }
 
@@ -677,12 +906,26 @@ function getRecommendation(
       hint: hardYesterday
         ? "Gestern war fordernd – heute eher kontrolliert statt Vollgas"
         : "Heute kontrolliert trainieren und Reserven nicht komplett verbrauchen",
-      bmi,
-      bmiText: getBmiText(bmi),
       trendHint:
         avgSleep < 7 ? "Schlaftrend bremst heute etwas." : "Solide Basis, aber nicht Vollgas.",
       ...plan,
       alternativeWorkout: hardYesterday ? "Oberkörper Standard" : "Ganzkörper kurz",
+      coachShort: "Solider Tag – heute lieber kontrolliert statt maximal.",
+      ...buildBaseRecommendation(
+        current,
+        bmi,
+        score,
+        currentTotalLoad,
+        hardYesterday,
+        qualityLimitReached
+      ),
+      avoidToday: buildAvoidTodayText(
+        "ZONE 2 oder KRAFT",
+        current.preferredTraining,
+        hardYesterday,
+        current.soreness,
+        qualityLimitReached
+      ),
     };
   }
 
@@ -693,14 +936,28 @@ function getRecommendation(
     ampel: "ROT",
     recommendation: "REGENERATION",
     hint: "Zu viele Signale sprechen heute gegen hohe Intensität",
-    bmi,
-    bmiText: getBmiText(bmi),
     trendHint:
       avgStress > 35
         ? "Stressverlauf ist derzeit zu hoch für harte Reize."
         : "Heute zuerst Reserven aufbauen.",
     ...recoveryPlan,
     alternativeWorkout: "Kompletter Ruhetag",
+    coachShort: "Heute Erholung priorisieren – Qualität würde wenig bringen.",
+    ...buildBaseRecommendation(
+      current,
+      bmi,
+      score,
+      currentTotalLoad,
+      hardYesterday,
+      qualityLimitReached
+    ),
+    avoidToday: buildAvoidTodayText(
+      "REGENERATION",
+      current.preferredTraining,
+      hardYesterday,
+      current.soreness,
+      qualityLimitReached
+    ),
   };
 }
 
@@ -992,7 +1249,12 @@ function getsorenessOverride(
   soreness: number,
   preferredTraining: PreferredTraining,
   bmi: number,
-  zones: HeartRateZones
+  zones: HeartRateZones,
+  score: number,
+  currentTotalLoad: number,
+  hardYesterday: boolean,
+  qualityLimitReached: boolean,
+  current: DayEntry
 ): Recommendation | null {
   if (soreness >= 8) {
     const recoveryPlan =
@@ -1002,11 +1264,21 @@ function getsorenessOverride(
       ampel: "ROT",
       recommendation: "REGENERATION",
       hint: "Starker Muskelkater – heute keine harte oder beinlastige Einheit",
-      bmi,
-      bmiText: getBmiText(bmi),
       trendHint: "Muskulatur ist noch nicht bereit für Intensität.",
       ...recoveryPlan,
       alternativeWorkout: "Kompletter Ruhetag",
+      coachShort: "Heute Erholung priorisieren – Qualität würde wenig bringen.",
+      bmi,
+      bmiText: getBmiText(bmi),
+      whyToday: buildWhyTodayText(score, current, currentTotalLoad, hardYesterday),
+      avoidToday: buildAvoidTodayText(
+        "REGENERATION",
+        preferredTraining,
+        hardYesterday,
+        soreness,
+        qualityLimitReached
+      ),
+      intensityLevel: "LEICHT",
     };
   }
 
@@ -1018,11 +1290,21 @@ function getsorenessOverride(
       ampel: "GELB",
       recommendation: preferredTraining === "Kraft" ? "KRAFT MODERAT" : "LOCKER TRAINIEREN",
       hint: "Deutlicher Muskelkater – heute kein Intervall, keine Schwelle, kein Beintraining",
-      bmi,
-      bmiText: getBmiText(bmi),
       trendHint: "Heute locker bleiben und muskulär erholen.",
       ...moderatePlan,
       alternativeWorkout: "Mobility + Spaziergang",
+      coachShort: "Solider Tag – heute lieber kontrolliert statt maximal.",
+      bmi,
+      bmiText: getBmiText(bmi),
+      whyToday: buildWhyTodayText(score, current, currentTotalLoad, hardYesterday),
+      avoidToday: buildAvoidTodayText(
+        preferredTraining === "Kraft" ? "KRAFT MODERAT" : "LOCKER TRAINIEREN",
+        preferredTraining,
+        hardYesterday,
+        soreness,
+        qualityLimitReached
+      ),
+      intensityLevel: "LEICHT",
     };
   }
 
@@ -1125,6 +1407,10 @@ export default function Home() {
         heartRateText: "-",
         strengthFocus: "-",
         alternativeWorkout: "-",
+        coachShort: "Erst Daten eingeben, dann kann die App sauber coachen.",
+        whyToday: "Noch keine Daten vorhanden",
+        avoidToday: "Ohne Tagesdaten keine harte Einheit erzwingen",
+        intensityLevel: "LEICHT" as const,
       };
     }
 
@@ -1435,6 +1721,21 @@ export default function Home() {
               <p style={styles.heroSmall}>
                 {activeProfile?.name}: {result.trendHint}
               </p>
+
+              <div style={styles.noteList}>
+                <div style={styles.noteItem}>
+                  <strong>Coach-Feedback:</strong> {result.coachShort}
+                </div>
+                <div style={styles.noteItem}>
+                  <strong>Warum heute:</strong> {result.whyToday}
+                </div>
+                <div style={styles.noteItem}>
+                  <strong>Heute vermeiden:</strong> {result.avoidToday}
+                </div>
+                <div style={styles.noteItem}>
+                  <strong>Intensität:</strong> {result.intensityLevel}
+                </div>
+              </div>
             </section>
 
             <section style={styles.card}>
@@ -1967,7 +2268,7 @@ export default function Home() {
                           <strong>Heutige Gesamtdauer:</strong> {getTodaySessionsTotalDuration(entry)} min
                         </div>
                         <div style={styles.historyLine}>
-                          <strong>Coach-Hinweis:</strong> {itemResult.hint}
+                          <strong>Coach-Hinweis:</strong> {itemResult.coachShort}
                         </div>
 
                         <div style={styles.historyActions}>
@@ -2042,7 +2343,7 @@ export default function Home() {
                   Intervall und Schwelle sind jetzt auf maximal 2 Qualitätseinheiten pro 7 Tage begrenzt
                 </div>
                 <div style={styles.noteItem}>
-                  Mehrere Einheiten pro Tag mit Art, Dauer, Load, RPE und Notiz sind jetzt möglich
+                  Die App gibt jetzt zusätzlich Coach-Feedback, Warum-heute und Heute-vermeiden aus
                 </div>
               </div>
             </section>
